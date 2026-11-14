@@ -30,6 +30,8 @@ Use `-SkipFirewall` if IT manages the allow rule centrally. Use `-VerifyOnly` to
 
 Keep RDP access under the existing IT policy. The preview needs no outbound Internet access or camera network rule.
 
+To use a different web port, allow the new TCP port in the firewall first, then open **Admin → Service** and choose **Save port and restart**. Open the new address shown after saving and sign in again. The setup firewall rule covers TCP `8765`. PlateLog uses that startup port as a fallback if the saved port is occupied when the service starts.
+
 ## Backup and removal
 
 Stop the service, copy the entire data directory to approved storage, then start the service again. To remove the preview, run the following from an administrator PowerShell. Keep or dispose of the data under the site's retention policy.

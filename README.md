@@ -97,10 +97,14 @@ Set a password interactively, then start the preview with the same persistent di
 
 ```sh
 python -m platelog admin-password --data-dir .platelog-data
-python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney
+python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney --manage-web-port
 ```
 
 Open **Admin** and sign in. Set separate limits for passages and photos, see stored counts and photo storage, and review recent admin changes. Cleanup starts disabled. After you turn it on, it runs at startup and hourly. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label.
+
+The administrator password starts unset. Set it from the terminal to enable Admin sign-in. Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
+
+On a native install, **Admin → Service** can change the web port when `--manage-web-port` is set. Allow the new TCP port in the firewall first. Saving the port restarts the listener and shows the new URL. The port passed at launch is the fallback if the saved port is occupied at startup. For Docker, set the host port in the Docker `-p` mapping and keep the container port at `8765`.
 
 Admin sign-in works over HTTP once a password is set in the persistent data directory. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries the password and session cookie in clear text. To require HTTPS, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command can reset the password and invalidates active sessions. This preview uses simulated camera data and a single administrator password.
 

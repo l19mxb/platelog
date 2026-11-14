@@ -3,7 +3,7 @@
   <name>PlateLog</name>
   <description>PlateLog synthetic camera preview</description>
   <executable>%BASE%\.venv\Scripts\python.exe</executable>
-  <arguments>-E -B -m platelog preview --host 0.0.0.0 --allowed-host * --port 8765 --timezone Australia/Sydney --data-dir "%ProgramData%\PlateLog\data"</arguments>
+  <arguments>-E -B -m platelog preview --host 0.0.0.0 --allowed-host * --port 8765 --timezone Australia/Sydney --data-dir "%ProgramData%\PlateLog\data" --manage-web-port</arguments>
   <workingdirectory>%BASE%</workingdirectory>
   <serviceaccount>
     <domain>NT AUTHORITY</domain>

@@ -115,9 +115,22 @@ class Store:
             db.execute("INSERT INTO settings VALUES (?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (name, value))
             self._audit(db, activity)
 
+    def change_admin_password(self, current: str, replacement: str) -> bool:
+        with closing(self.connect()) as db, db:
+            changed = db.execute("UPDATE settings SET value=? WHERE name='admin_password' AND value=?",
+                                 (replacement, current))
+            if not changed.rowcount:
+                return False
+            self._audit(db, "Administrator password changed")
+            return True
+
     def _audit(self, db: sqlite3.Connection, activity: str) -> None:
         db.execute("INSERT INTO admin_audit(at_ms,activity) VALUES (?,?)", (time.time_ns() // 1_000_000, activity))
         db.execute("DELETE FROM admin_audit WHERE id <= (SELECT max(id)-1000 FROM admin_audit)")
+
+    def record_admin_activity(self, activity: str) -> None:
+        with closing(self.connect()) as db, db:
+            self._audit(db, activity)
 
     def retention(self) -> dict:
         saved = self.setting("retention")

@@ -314,12 +314,16 @@ def password_key(password: str, salt: bytes) -> bytes:
     return hashlib.scrypt(password.encode(), salt=salt, n=2**16, r=8, p=2, maxmem=96 * 1024**2)
 
 
-def set_admin_password(store: Store, password: str) -> None:
+def password_verifier(password: str) -> str:
     if not 14 <= len(password) or len(password.encode()) > 1024:
         raise ValueError("Use at least 14 characters and no more than 1024 bytes.")
     salt = secrets.token_bytes(16)
     key = password_key(password, salt)
-    store.set_setting("admin_password", f"{salt.hex()}:{key.hex()}", "Administrator password set")
+    return f"{salt.hex()}:{key.hex()}"
+
+
+def set_admin_password(store: Store, password: str) -> None:
+    store.set_setting("admin_password", password_verifier(password), "Administrator password set")
 
 
 def password_matches(password: str, verifier: str) -> bool:
@@ -329,7 +333,7 @@ def password_matches(password: str, verifier: str) -> bool:
     return hmac.compare_digest(password_key(password, bytes.fromhex(salt)), bytes.fromhex(expected))
 
 
-async def admin_form(request: Request) -> dict[str, str]:
+async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
     expected = f"{request.url.scheme}://{request.headers.get('host')}"
     if request.headers.get("origin") != expected:
         raise HTTPException(403, "Submit the form from the PlateLog Admin page.")
@@ -337,7 +341,7 @@ async def admin_form(request: Request) -> dict[str, str]:
         raise HTTPException(415, "Expected a form submission.")
     body = bytearray()
     async for chunk in request.stream():
-        if len(body) + len(chunk) > 4096:
+        if len(body) + len(chunk) > limit:
             raise HTTPException(413, "Admin form is too large.")
         body.extend(chunk)
     try:
@@ -349,10 +353,13 @@ async def admin_form(request: Request) -> dict[str, str]:
     return {name: values[0] for name, values in fields.items()}
 
 
-def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool) -> None:
+def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
+                 restart: Callable[[], None] | None, web_port: int | None,
+                 change_web_port: Callable[[int], None] | None) -> None:
     sessions: dict[str, tuple[float, str, str]] = {}
     login_attempts: list[float] = []
     password_check = asyncio.Lock()
+    restarting = False
 
     def transport_ok(request: Request) -> bool:
         return allow_http_admin or request.url.scheme == "https"
@@ -384,6 +391,15 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
         changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
+        port_form = f'''<form method="post" action="/admin/web-port">
+            <input type="hidden" name="csrf" value="{csrf}">
+            <label>Web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
+            <p>Allow the new TCP port in your firewall before applying it.</p>
+            <button type="submit">Save port and restart</button></form>''' if restart and change_web_port else ""
+        restart_form = f'''<section><h3>Service</h3><form method="post" action="/admin/restart">
+            <input type="hidden" name="csrf" value="{csrf}">
+            <label class="enable"><input type="checkbox" name="confirm" value="yes" required> Confirm restart</label>
+            <button type="submit">Restart PlateLog</button></form>{port_form}</section>''' if restart else ""
         return show(f'''<p class="notice" role="status">{escape(message)}</p><section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
@@ -391,6 +407,13 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>Keep passages (days) <input type="number" name="passage_days" min="1" max="3650" value="{retention['passage_days']}" required></label>
             <label>Keep photos (days) <input type="number" name="photo_days" min="1" max="3650" value="{retention['photo_days']}" required></label>
             <button type="submit">Save settings</button></form></section>
+            <section><h3>Change administrator password</h3>
+            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
+            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
+            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
+            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
+            <button type="submit">Change password</button></form></section>
+            {restart_form}
             <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
             <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
             <dt>Last cleanup (UTC)</dt><dd>{timestamp(int(last)) if last else 'None yet'}</dd></dl></section>
@@ -399,7 +422,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <button type="submit">Sign out</button></form></section>''', status)
 
     @app.get("/admin", response_class=HTMLResponse)
-    def admin(request: Request, saved: bool = False):
+    def admin(request: Request, saved: bool = False, password_changed: bool = False):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -407,7 +430,9 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if not credential(request):
             return show("<p>Set an administrator password on the server to activate this tab.</p>")
         csrf = authenticated(request)
-        return dashboard(csrf, "Retention settings saved." if saved else "") if csrf else login_page()
+        if csrf:
+            return dashboard(csrf, "Retention settings saved." if saved else "")
+        return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
     @app.post("/admin/login")
     async def login(request: Request):
@@ -438,11 +463,11 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                             secure=request.url.scheme == "https", max_age=SESSION_SECONDS)
         return response
 
-    async def authorized_form(request: Request) -> tuple[str, dict[str, str]]:
+    async def authorized_form(request: Request, limit: int = 4096) -> tuple[str, dict[str, str]]:
         csrf = authenticated(request)
         if not csrf:
             raise HTTPException(403, "Sign in as administrator.")
-        fields = await admin_form(request)
+        fields = await admin_form(request, limit)
         if not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
             raise HTTPException(403, "Reload the Admin page before submitting.")
         return csrf, fields
@@ -470,9 +495,80 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         response.delete_cookie(ADMIN_COOKIE, path="/admin", secure=request.url.scheme == "https", httponly=True, samesite="strict")
         return response
 
+    @app.post("/admin/password")
+    async def change_password(request: Request):
+        current = credential(request)
+        csrf, fields = await authorized_form(request, limit=10_240)
+        value = fields.get("new_password", "")
+        if value != fields.get("confirm_password"):
+            return dashboard(csrf, "The new passwords did not match.", 400)
+        async with password_check:
+            if not current or current != credential(request):
+                raise HTTPException(403, "Sign in again to change the password.")
+            if not await run_in_threadpool(password_matches, fields.get("current_password", ""), current):
+                return dashboard(csrf, "Incorrect current password.", 401)
+            try:
+                replacement = await run_in_threadpool(password_verifier, value)
+            except ValueError as exc:
+                return dashboard(csrf, str(exc), 400)
+            if not await run_in_threadpool(store.change_admin_password, current, replacement):
+                raise HTTPException(403, "Sign in again to change the password.")
+            sessions.clear()
+            login_attempts.clear()
+        response = RedirectResponse("/admin?password_changed=true", status_code=303)
+        response.delete_cookie(ADMIN_COOKIE, path="/admin", secure=request.url.scheme == "https", httponly=True, samesite="strict")
+        return response
+
+    def restart_response(destination: str = "/admin"):
+        response = show(f'<p>PlateLog is restarting. <a href="{escape(destination)}">Open Admin</a> in a moment to sign in again.</p>', 202)
+        restart()
+        return response
+
+    @app.post("/admin/restart")
+    async def restart_service(request: Request):
+        nonlocal restarting
+        csrf, fields = await authorized_form(request)
+        if not restart or restarting:
+            raise HTTPException(409, "PlateLog cannot accept a restart request right now.")
+        if fields.get("confirm") != "yes":
+            return dashboard(csrf, "Confirm the restart first.", 400)
+        restarting = True
+        try:
+            await run_in_threadpool(store.record_admin_activity, "PlateLog restart requested")
+        except Exception:
+            restarting = False
+            raise
+        return restart_response()
+
+    @app.post("/admin/web-port")
+    async def save_web_port(request: Request):
+        nonlocal restarting
+        csrf, fields = await authorized_form(request)
+        if not change_web_port or not restart or restarting:
+            raise HTTPException(409, "The web port cannot be changed right now.")
+        port_text = fields.get("port", "")
+        if not re.fullmatch(r"[0-9]{1,5}", port_text) or not 1 <= int(port_text) <= 65535:
+            return dashboard(csrf, "Enter a web port from 1 to 65535.", 400)
+        port = int(port_text)
+        if port == web_port:
+            return dashboard(csrf, "PlateLog is already using this port.")
+        destination = str(request.url.replace(port=port, path="/admin", query=""))
+        restarting = True
+        try:
+            await run_in_threadpool(change_web_port, port)
+        except OSError:
+            restarting = False
+            return dashboard(csrf, "PlateLog could not open that port. Choose another port.", 409)
+        except Exception:
+            restarting = False
+            raise
+        return restart_response(destination)
+
 
 def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | ZoneInfo = timezone.utc,
-                 *, persistent: bool = False, allow_http_admin: bool = True) -> FastAPI:
+                 *, persistent: bool = False, allow_http_admin: bool = True,
+                 restart: Callable[[], None] | None = None, web_port: int | None = None,
+                 change_web_port: Callable[[int], None] | None = None) -> FastAPI:
     if allowed_host != "*" and not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", allowed_host):
         raise ValueError("Expected a hostname, IPv4 address, or '*' for --allowed-host")
     store = Store(data_dir)
@@ -498,7 +594,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
-    admin_routes(app, store, persistent, allow_http_admin)
+    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port)
 
     @app.middleware("http")
     async def preview_headers(request: Request, call_next):

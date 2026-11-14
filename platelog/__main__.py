@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -49,6 +50,73 @@ def demo(data_dir: Path | None = None) -> dict:
             thread.join(timeout=10)
 
 
+def run_preview(args, data_dir: Path, display_zone: ZoneInfo) -> None:
+    from .preview import make_preview
+    from .store import Store
+
+    store = Store(data_dir) if args.manage_web_port else None
+    port = args.port
+    restarting = False
+    listener = None
+
+    def bind_port(requested: int) -> socket.socket:
+        sock = socket.socket()
+        try:
+            if os.name != "nt":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((args.host, requested))
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
+    def change_port(requested: int) -> None:
+        nonlocal port, listener
+        if store is None:
+            raise RuntimeError("Web port control is disabled")
+        reserved = bind_port(requested)
+        try:
+            store.set_setting("web_port", str(requested), f"Web port changed to {requested}")
+        except BaseException:
+            reserved.close()
+            raise
+        port, listener = requested, reserved
+
+    def request_restart() -> None:
+        nonlocal restarting
+        restarting = True
+        server.should_exit = True
+
+    saved = store.setting("web_port") if store else None
+    if saved is not None and int(saved) != port:
+        try:
+            listener = bind_port(int(saved))
+        except OSError as exc:
+            print(f"PlateLog: saved web port {saved} is unavailable ({exc}). Using port {port}.", file=sys.stderr)
+            store.set_setting("web_port", str(port), f"Web port restored to {port} because port {saved} was unavailable")
+        else:
+            port = int(saved)
+    try:
+        while True:
+            restarting = False
+            app = make_preview(data_dir, args.allowed_host, display_zone, persistent=bool(args.data_dir),
+                               allow_http_admin=args.allow_http_admin, restart=request_restart, web_port=port,
+                               change_web_port=change_port if store else None)
+            server = uvicorn.Server(uvicorn.Config(
+                app, host=args.host, port=port, proxy_headers=False, access_log=False, timeout_graceful_shutdown=15,
+                ssl_certfile=str(args.tls_cert) if args.tls_cert else None,
+                ssl_keyfile=str(args.tls_key) if args.tls_key else None,
+            ))
+            current, listener = listener, None
+            with current if current is not None else nullcontext():
+                server.run(sockets=[current] if current is not None else None)
+            if not restarting:
+                return
+    finally:
+        if listener is not None:
+            listener.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run PlateLog with synthetic Axis events")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -58,6 +126,7 @@ def main() -> None:
     preview.add_argument("--allowed-host", default="127.0.0.1", help="Accepted HTTP hostname, or '*' for any hostname")
     preview.add_argument("--timezone", default="UTC", help="IANA time zone used in the register")
     preview.add_argument("--data-dir", type=Path, help="Persistent preview data and admin settings")
+    preview.add_argument("--manage-web-port", action="store_true", help="Let Admin change the native web listener port")
     preview.add_argument("--tls-cert", type=Path, help="PEM certificate for HTTPS")
     preview.add_argument("--tls-key", type=Path, help="PEM private key for HTTPS")
     admin_transport = preview.add_mutually_exclusive_group()
@@ -91,14 +160,14 @@ def main() -> None:
             print("PlateLog administrator password saved.")
             return
         if args.command == "preview":
-            from .preview import make_preview
-
             try:
                 display_zone = ZoneInfo(args.timezone)
             except ZoneInfoNotFoundError:
                 parser.error(f"Unknown time zone: {args.timezone}")
             if bool(args.tls_cert) != bool(args.tls_key):
                 parser.error("Supply both --tls-cert and --tls-key for HTTPS.")
+            if args.manage_web_port and not args.data_dir:
+                parser.error("--manage-web-port requires --data-dir.")
             scratch = nullcontext(args.data_dir) if args.data_dir else tempfile.TemporaryDirectory(prefix="platelog-preview-")
             with scratch as directory:
                 data_dir = Path(directory)
@@ -111,11 +180,7 @@ def main() -> None:
                         store.set_setting("preview_seeded", "yes", "Demo data seeded")
                 else:
                     demo(data_dir)
-                uvicorn.run(make_preview(data_dir, args.allowed_host, display_zone, persistent=bool(args.data_dir),
-                                         allow_http_admin=args.allow_http_admin),
-                            host=args.host, port=args.port, proxy_headers=False, access_log=False,
-                            ssl_certfile=str(args.tls_cert) if args.tls_cert else None,
-                            ssl_keyfile=str(args.tls_key) if args.tls_key else None)
+                run_preview(args, data_dir, display_zone)
             return
         token = os.environ.get("PLATELOG_DEMO_TOKEN", "")
         if not token:
