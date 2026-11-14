@@ -70,6 +70,27 @@ docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 -p 
 
 For a LAN demo, publish `8765:8765` and pass `preview --host 0.0.0.0 --allowed-host SERVER_NAME` after the image name. Use the server hostname or IPv4 address in place of `SERVER_NAME`. Anyone who can reach the listener can view and export the sample register.
 
+### Run Docker on an offline Linux server
+
+On an internet-connected machine with Docker, build the image from this repository. Use the same CPU architecture as the destination server.
+
+```sh
+docker build -t platelog-preview:latest .
+docker save -o platelog-preview.tar platelog-preview:latest
+```
+
+Transfer `platelog-preview.tar` to the offline Linux server using your approved file transfer process. With Docker already installed, run these commands from the folder containing the archive.
+
+```sh
+docker load -i platelog-preview.tar
+docker run -d --name platelog --restart unless-stopped --pull=never \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 \
+  -p 0.0.0.0:8765:8765 platelog-preview:latest \
+  preview --host 0.0.0.0 --allowed-host '*'
+```
+
+From a desk that can reach TCP port `8765` on the server, open `http://SERVER-NAME:8765/` using the Linux server's hostname or IPv4 address. This setup recreates the synthetic register on restart. Persistent Admin and retention settings require a writable data volume and an administrator password.
+
 ## Admin
 
 Set a password interactively, then start the preview with the same persistent directory:
