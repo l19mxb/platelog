@@ -20,7 +20,7 @@ The x64 ZIP includes a signed Python 3.13.17 offline installer, WinSW 2.12.0 for
 
 The preview listens on all IPv4 interfaces (`0.0.0.0:8765`). Setup adds a Windows Firewall allow rule for the PlateLog listener on TCP 8765 from `Any` source by default. Routing, network firewalls and Group Policy still determine which desks can connect. The register, photos and Excel export are available to anyone who can reach the listener. This bundle contains only synthetic plates. Admin requires the password set during setup. HTTP carries the password and session cookie in clear text. [Windows Firewall rule address and port scoping](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
 
-To protect the staff register and its direct photo and export links, set a staff password and enable **Require staff sign-in to view the register** under **Admin → Register access**. Use **Allow staff to open Admin settings** if those operators manage cameras, retention or reports. The administrator password controls sign-in settings.
+To protect the staff register and its direct photo and export links, set a separate staff password and enable **Require staff sign-in to view the register** under **Admin → Register access**. The staff password grants access to the register. The administrator password grants access to both the register and Admin settings.
 
 To limit the rule to selected desks or subnets, substitute the real addresses in this example:
 

@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCE
 
 PACKET_ORDER = "capture_ms DESC, counter DESC, received_ms DESC, rowid DESC"
 DEFAULT_RETENTION = {"enabled": False, "passage_days": 30, "photo_days": 7}
-DEFAULT_REGISTER_ACCESS = {"required": False, "staff_admin": False, "verifier": "", "revision": ""}
+DEFAULT_REGISTER_ACCESS = {"required": False, "verifier": "", "revision": ""}
 
 
 def vehicle_details(packets: list[sqlite3.Row]) -> dict[str, str | None]:
@@ -135,7 +135,7 @@ class Store:
         saved = self.setting("register_access")
         return json.loads(saved) if saved else DEFAULT_REGISTER_ACCESS.copy()
 
-    def set_register_access(self, required: bool, staff_admin: bool, verifier: str) -> None:
+    def set_register_access(self, required: bool, verifier: str) -> None:
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             saved = db.execute("SELECT value FROM settings WHERE name='register_access'").fetchone()
@@ -143,16 +143,12 @@ class Store:
             verifier = verifier or current["verifier"]
             if required and not verifier:
                 raise ValueError("Set a staff password before requiring sign-in.")
-            if staff_admin and not required:
-                raise ValueError("Enable register sign-in before allowing staff access to Admin.")
-            if (required, staff_admin, verifier) == (current["required"], current["staff_admin"], current["verifier"]):
+            if (required, verifier) == (current["required"], current["verifier"]) and "staff_admin" not in current:
                 return
-            value = json.dumps({"required": required, "staff_admin": staff_admin, "verifier": verifier,
-                                "revision": uuid4().hex})
+            value = json.dumps({"required": required, "verifier": verifier, "revision": uuid4().hex})
             db.execute("INSERT INTO settings VALUES ('register_access', ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
                        (value,))
-            self._audit(db, f"Register sign-in {'required' if required else 'optional'}. "
-                            f"Staff Admin access {'enabled' if staff_admin else 'disabled'}.")
+            self._audit(db, f"Register sign-in {'required' if required else 'optional'}.")
 
     def _audit(self, db: sqlite3.Connection, activity: str) -> None:
         db.execute("INSERT INTO admin_audit(at_ms,activity) VALUES (?,?)", (time.time_ns() // 1_000_000, activity))
