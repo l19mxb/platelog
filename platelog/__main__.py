@@ -126,6 +126,7 @@ def main() -> None:
     preview.add_argument("--allowed-host", default="127.0.0.1", help="Accepted HTTP hostname, or '*' for any hostname")
     preview.add_argument("--timezone", default="UTC", help="IANA time zone used in the register")
     preview.add_argument("--data-dir", type=Path, help="Persistent preview data and admin settings")
+    preview.add_argument("--no-demo", action="store_true", help="Start with an empty register and accept camera POSTs")
     preview.add_argument("--manage-web-port", action="store_true", help="Let Admin change the native web listener port")
     preview.add_argument("--tls-cert", type=Path, help="PEM certificate for HTTPS")
     preview.add_argument("--tls-key", type=Path, help="PEM private key for HTTPS")
@@ -166,8 +167,8 @@ def main() -> None:
                 parser.error(f"Unknown time zone: {args.timezone}")
             if bool(args.tls_cert) != bool(args.tls_key):
                 parser.error("Supply both --tls-cert and --tls-key for HTTPS.")
-            if args.manage_web_port and not args.data_dir:
-                parser.error("--manage-web-port requires --data-dir.")
+            if (args.manage_web_port or args.no_demo) and not args.data_dir:
+                parser.error("--manage-web-port and --no-demo require --data-dir.")
             scratch = nullcontext(args.data_dir) if args.data_dir else tempfile.TemporaryDirectory(prefix="platelog-preview-")
             with scratch as directory:
                 data_dir = Path(directory)
@@ -176,8 +177,9 @@ def main() -> None:
 
                     store = Store(data_dir)
                     if store.setting("preview_seeded") is None:
-                        demo(data_dir)
-                        store.set_setting("preview_seeded", "yes", "Demo data seeded")
+                        if not args.no_demo:
+                            demo(data_dir)
+                        store.set_setting("preview_seeded", "yes", "Register initialised" if args.no_demo else "Demo data seeded")
                 else:
                     demo(data_dir)
                 run_preview(args, data_dir, display_zone)

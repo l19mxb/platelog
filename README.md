@@ -1,6 +1,6 @@
 # PlateLog
 
-PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected retention settings. A separate receiver and simulator exercise Axis-style HTTP pushes, including plate corrections and duplicate packets. Connecting a real camera to the browser register remains part of the planned pilot in the [v1 specification](technical-spec.md).
+PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings. A persistent instance can receive Axis HTTP POST events into the same register. The [v1 specification](technical-spec.md) describes the wider pilot.
 
 ## Quick start
 
@@ -100,15 +100,21 @@ python -m platelog admin-password --data-dir .platelog-data
 python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney --manage-web-port
 ```
 
-Open **Admin** and sign in. Set separate limits for passages and photos, see stored counts and photo storage, and review recent admin changes. Cleanup starts disabled. After you turn it on, it runs at startup and hourly. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label.
+Open **Admin** and sign in. Under **Retention**, save separate age limits for passages and photos. **Purge now** asks for confirmation and applies the saved limits immediately, even when automatic cleanup is off. Automatic cleanup starts disabled and runs at startup and hourly once enabled. Purging a passage removes all of its event packets and photos. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label. **Storage** shows passage, event and photo counts, and **Recent admin activity** records purges and settings changes.
 
 The administrator password starts unset. Set it from the terminal to enable Admin sign-in. Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
 
-On a native install, **Admin → Service** can change the web port when `--manage-web-port` is set. Allow the new TCP port in the firewall first. Saving the port restarts the listener and shows the new URL. The port passed at launch is the fallback if the saved port is occupied at startup. For Docker, set the host port in the Docker `-p` mapping and keep the container port at `8765`.
+**Admin → Display** changes the time zone used for the register, date and time filters, and Excel reports. On a native install, **Admin → Service** can change the shared port for staff and cameras when `--manage-web-port` is set. Allow the new TCP port in the firewall first. Saving the port restarts the listener and shows the new address. Update each camera's POST destination to the new port. The port passed at launch is the fallback if the saved port is occupied at startup. For Docker, set the host port in the Docker `-p` mapping and keep the container port at `8765`.
 
 Admin sign-in works over HTTP once a password is set in the persistent data directory. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries the password and session cookie in clear text. To require HTTPS, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command can reset the password and invalidates active sessions. This preview uses simulated camera data and a single administrator password.
 
 For a native Windows Server preview with no Internet access, see the [offline bundle and Windows service setup](deploy/windows/README.md).
+
+### Configure Axis HTTP POST
+
+Use a persistent `--data-dir` to enable camera configuration. Starting with `--no-demo` and a fresh data directory gives you an empty register for a trial. In **Admin → Axis cameras**, add a camera ID such as `entry`. Select **HTTP Basic** and set a username and password, or select **No credentials** for a network where IT restricts access to the camera. Intake starts disabled until a camera is configured. Camera settings apply when saved.
+
+In AXIS License Plate Verifier, open **Integration → Push events**, select **HTTP POST**, and set the Server URL to the register's address with the camera's path. For `entry`, use `http://SERVER-NAME:8765/api/axis/entry/events`. If you selected Basic, enter the same username and password on the camera. Use the camera's **Test** button and check that the test plate appears on the register. PlateLog accepts JSON and multipart from configured cameras. Verify the target firmware with a controlled pass before accepting a live deployment. [Axis push event setup](https://help.axis.com/en-us/axis-license-plate-verifier#push-event-information-to-third-party-software) · [Axis push event API](https://developer.axis.com/vapix/applications/license-plate-verifier-api/#push-events)
 
 ## Suggested workplace trial
 

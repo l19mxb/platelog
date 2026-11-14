@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS images (
 );
 CREATE INDEX IF NOT EXISTS image_packet ON images(packet_id, position);
 CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS camera_settings (
+    id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL CHECK (mode IN ('disabled', 'none', 'basic')),
+    username TEXT NOT NULL,
+    verifier TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS admin_audit (
     id INTEGER PRIMARY KEY,
     at_ms INTEGER NOT NULL,
@@ -136,20 +142,51 @@ class Store:
         saved = self.setting("retention")
         return json.loads(saved) if saved else DEFAULT_RETENTION.copy()
 
+    def cameras(self) -> list[sqlite3.Row]:
+        with closing(self.connect()) as db:
+            return db.execute("SELECT id, mode, username FROM camera_settings ORDER BY id").fetchall()
+
+    def camera(self, camera_id: str) -> sqlite3.Row | None:
+        with closing(self.connect()) as db:
+            return db.execute("SELECT mode, username, verifier FROM camera_settings WHERE id=?", (camera_id,)).fetchone()
+
+    def save_camera(self, camera_id: str, mode: str, username: str, verifier: str) -> None:
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT username, verifier FROM camera_settings WHERE id=?", (camera_id,)).fetchone()
+            if mode == "basic":
+                verifier = verifier or (current["verifier"] if current and current["username"] == username else "")
+                if not verifier:
+                    raise ValueError("Set a password for this camera username.")
+            elif current:
+                username, verifier = current["username"], current["verifier"]
+            db.execute("""INSERT INTO camera_settings VALUES (?, ?, ?, ?)
+                          ON CONFLICT(id) DO UPDATE SET mode=excluded.mode, username=excluded.username,
+                          verifier=excluded.verifier""", (camera_id, mode, username, verifier))
+            self._audit(db, f"Camera {camera_id} configured ({mode})")
+
+    def passage_cameras(self) -> set[str]:
+        with closing(self.connect()) as db:
+            return {row[0] for row in db.execute("SELECT DISTINCT camera FROM passages")}
+
     def admin_overview(self) -> tuple[dict, list[sqlite3.Row]]:
         with closing(self.connect()) as db:
             counts = db.execute("""SELECT (SELECT count(*) FROM passages) AS passages,
+                                (SELECT count(*) FROM packets) AS packets,
                                 count(*) AS photos, coalesce(sum(byte_count),0) AS photo_bytes FROM images""").fetchone()
             audit = db.execute("SELECT at_ms,activity FROM admin_audit ORDER BY id DESC LIMIT 10").fetchall()
         return dict(counts), audit
 
-    def apply_retention(self, now_ms: int | None = None) -> tuple[int, int]:
+    def apply_retention(self, now_ms: int | None = None, *, confirmed_limits: tuple[int, int] | None = None) -> tuple[int, int]:
         now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             saved = db.execute("SELECT value FROM settings WHERE name='retention'").fetchone()
             config = json.loads(saved[0]) if saved else DEFAULT_RETENTION
-            if not config["enabled"]:
+            manual = confirmed_limits is not None
+            if manual and confirmed_limits != (config["passage_days"], config["photo_days"]):
+                raise ValueError("Retention limits changed. Review the saved limits before purging.")
+            if not config["enabled"] and not manual:
                 return 0, 0
             passage_before = now - config["passage_days"] * 86_400_000
             photo_before = now - config["photo_days"] * 86_400_000
@@ -164,8 +201,9 @@ class Store:
             db.execute("DELETE FROM packets WHERE passage_id IN (SELECT id FROM passages WHERE last_ms<?)", (passage_before,))
             passages = db.execute("DELETE FROM passages WHERE last_ms<?", (passage_before,)).rowcount
             db.execute("INSERT INTO settings VALUES ('retention_last_run',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (str(now),))
-            if photos or passages:
-                self._audit(db, f"Retention removed {passages} passages and {photos} photos")
+            if manual or photos or passages:
+                action = "Manual purge" if manual else "Retention"
+                self._audit(db, f"{action} removed {passages} passages and {photos} photos")
         self.reconcile()
         return passages, photos
 

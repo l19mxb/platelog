@@ -19,7 +19,7 @@ from typing import Annotated, Callable
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZIP_DEFLATED, ZipFile
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -27,7 +27,8 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .receiver import CAMERAS, ID_PATTERN
+from .credentials import password_matches, password_verifier
+from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN, add_camera_intake, camera_can_post
 from .store import Store
 
 CSS = """
@@ -161,6 +162,7 @@ class RegisterFilters:
     end: str
     start_ms: int | None
     end_ms: int | None
+    zone: timezone | ZoneInfo
 
 
 def time_bound(text: str, zone: timezone | ZoneInfo, *, end: bool = False) -> int | None:
@@ -305,32 +307,13 @@ def page(title: str, content: str) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{escape(title)} | PlateLog</title><link rel="stylesheet" href="/preview.css"><script defer src="/preview.js"></script></head>
-    <body><main><header><h1>PlateLog</h1><p>Simulated Axis camera events</p>
+    <body><main><header><h1>PlateLog</h1><p>Vehicle passage register</p>
     <nav class="tabs" aria-label="PlateLog"><a href="/"{register_current}>Register</a>
     <a href="/admin"{admin_current}>Admin</a></nav></header>{content}</main></body></html>"""
 
 
-def password_key(password: str, salt: bytes) -> bytes:
-    return hashlib.scrypt(password.encode(), salt=salt, n=2**16, r=8, p=2, maxmem=96 * 1024**2)
-
-
-def password_verifier(password: str) -> str:
-    if not 14 <= len(password) or len(password.encode()) > 1024:
-        raise ValueError("Use at least 14 characters and no more than 1024 bytes.")
-    salt = secrets.token_bytes(16)
-    key = password_key(password, salt)
-    return f"{salt.hex()}:{key.hex()}"
-
-
 def set_admin_password(store: Store, password: str) -> None:
     store.set_setting("admin_password", password_verifier(password), "Administrator password set")
-
-
-def password_matches(password: str, verifier: str) -> bool:
-    if not password or len(password.encode()) > 1024:
-        return False
-    salt, expected = verifier.split(":", 1)
-    return hmac.compare_digest(password_key(password, bytes.fromhex(salt)), bytes.fromhex(expected))
 
 
 async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
@@ -353,9 +336,22 @@ async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
     return {name: values[0] for name, values in fields.items()}
 
 
+def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username: str = "") -> str:
+    options = "".join(f'<option value="{value}"{" selected" if value == mode else ""}>{label}</option>'
+                      for value, label in (("disabled", "Disabled"), ("basic", "HTTP Basic"), ("none", "No credentials")))
+    identity = (f'<input type="hidden" name="camera_id" value="{camera_id}">'
+                f'<p>{camera_id} · <code>/api/axis/{camera_id}/events</code></p>' if camera_id else
+                '<label>New camera ID <input name="camera_id" maxlength="64" required></label>')
+    return f'''<form method="post" action="/admin/cameras"><input type="hidden" name="csrf" value="{csrf}">
+        {identity}<label>POST authentication <select name="mode">{options}</select></label>
+        <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
+        <label>Password <input type="password" name="password" autocomplete="new-password"></label>
+        <button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></form>'''
+
+
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
-                 change_web_port: Callable[[int], None] | None) -> None:
+                 change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo) -> None:
     sessions: dict[str, tuple[float, str, str]] = {}
     login_attempts: list[float] = []
     password_check = asyncio.Lock()
@@ -391,30 +387,46 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
         changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
+        cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"]) for row in store.cameras())
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
-            <label>Web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
+            <label>Shared web and camera port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
             <p>Allow the new TCP port in your firewall before applying it.</p>
             <button type="submit">Save port and restart</button></form>''' if restart and change_web_port else ""
         restart_form = f'''<section><h3>Service</h3><form method="post" action="/admin/restart">
             <input type="hidden" name="csrf" value="{csrf}">
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required> Confirm restart</label>
             <button type="submit">Restart PlateLog</button></form>{port_form}</section>''' if restart else ""
-        return show(f'''<p class="notice" role="status">{escape(message)}</p><section><h3>Retention</h3>
+        return show(f'''<p class="notice" role="status">{escape(message)}</p>{restart_form}
+            <section><h3>Display</h3><form method="post" action="/admin/timezone">
+            <input type="hidden" name="csrf" value="{csrf}">
+            <label>Time zone <input name="timezone" maxlength="128" value="{escape(store.setting('display_timezone') or str(display_zone))}" required></label>
+            <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
+            <section><h3>Axis cameras</h3><p>Use the same host and port as this register with the path shown for each camera.
+            Camera IDs use lowercase letters, digits, dashes and underscores.
+            For HTTP Basic, set a username and a password of at least 14 characters. Leave the password blank to keep it for the same username.</p>
+            {cameras}{camera_form(csrf)}</section>
+            <section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
             <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if retention['enabled'] else ''}>Enable automatic cleanup</label>
             <label>Keep passages (days) <input type="number" name="passage_days" min="1" max="3650" value="{retention['passage_days']}" required></label>
             <label>Keep photos (days) <input type="number" name="photo_days" min="1" max="3650" value="{retention['photo_days']}" required></label>
-            <button type="submit">Save settings</button></form></section>
+            <button type="submit">Save settings</button></form>
+            <form method="post" action="/admin/purge"><input type="hidden" name="csrf" value="{csrf}">
+            <input type="hidden" name="passage_days" value="{retention['passage_days']}">
+            <input type="hidden" name="photo_days" value="{retention['photo_days']}">
+            <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
+            Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
+            <button type="submit">Purge now</button></form></section>
             <section><h3>Change administrator password</h3>
             <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
             <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
             <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
             <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
             <button type="submit">Change password</button></form></section>
-            {restart_form}
             <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
+            <dt>Events</dt><dd>{counts['packets']:,}</dd>
             <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
             <dt>Last cleanup (UTC)</dt><dd>{timestamp(int(last)) if last else 'None yet'}</dd></dl></section>
             <section><h3>Recent admin activity (UTC)</h3>{f'<ul>{changes}</ul>' if changes else '<p>No activity yet.</p>'}</section>
@@ -486,6 +498,55 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         activity = f"Retention saved: {days['passage_days']} days for passages, {days['photo_days']} for photos, cleanup {'on' if enabled else 'off'}"
         await run_in_threadpool(store.set_setting, "retention", settings, activity)
         return RedirectResponse("/admin?saved=true", status_code=303)
+
+    @app.post("/admin/purge")
+    async def purge(request: Request):
+        csrf, fields = await authorized_form(request)
+        if fields.get("confirm") != "yes":
+            return dashboard(csrf, "Confirm permanent deletion first.", 400)
+        try:
+            limits = int(fields.get("passage_days", "")), int(fields.get("photo_days", ""))
+        except ValueError:
+            return dashboard(csrf, "Review the saved age limits first.", 400)
+        try:
+            passages, photos = await run_in_threadpool(store.apply_retention, confirmed_limits=limits)
+        except ValueError as exc:
+            return dashboard(csrf, str(exc), 409)
+        return dashboard(csrf, f"Purged {passages} passages and {photos} photos.")
+
+    @app.post("/admin/cameras")
+    async def save_camera(request: Request):
+        csrf, fields = await authorized_form(request)
+        camera_id = fields.get("camera_id", "").strip()
+        mode = fields.get("mode", "")
+        username = fields.get("username", "").strip() if mode == "basic" else ""
+        password = fields.get("password", "") if mode == "basic" else ""
+        if not re.fullmatch(CAMERA_ID_PATTERN, camera_id) or camera_id in CAMERAS:
+            return dashboard(csrf, "Use a unique camera ID with lowercase letters, digits, dashes or underscores.", 400)
+        if mode not in {"disabled", "basic", "none"}:
+            return dashboard(csrf, "Choose a camera authentication mode.", 400)
+        if mode == "basic" and not re.fullmatch(r"[!-9;-~]{1,128}", username):
+            return dashboard(csrf, "Enter a camera username without spaces or colons.", 400)
+        try:
+            async with password_check:
+                verifier = await run_in_threadpool(password_verifier, password) if password else ""
+            await run_in_threadpool(store.save_camera, camera_id, mode, username, verifier)
+        except ValueError as exc:
+            return dashboard(csrf, str(exc), 400)
+        return dashboard(csrf, f"Saved camera {camera_id}.")
+
+    @app.post("/admin/timezone")
+    async def save_timezone(request: Request):
+        csrf, fields = await authorized_form(request)
+        name = fields.get("timezone", "").strip()
+        try:
+            if len(name) > 128:
+                raise ValueError
+            ZoneInfo(name)
+        except (ValueError, ZoneInfoNotFoundError):
+            return dashboard(csrf, "Enter a valid IANA time zone, such as Australia/Sydney.", 400)
+        await run_in_threadpool(store.set_setting, "display_timezone", name, f"Display time zone changed to {name}")
+        return dashboard(csrf, "Time zone saved.")
 
     @app.post("/admin/logout")
     async def logout(request: Request):
@@ -594,7 +655,9 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
-    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port)
+    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone)
+    if persistent:
+        add_camera_intake(app, store, lambda camera, header: camera_can_post(store, camera, header))
 
     @app.middleware("http")
     async def preview_headers(request: Request, call_next):
@@ -618,11 +681,13 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     def filters_for_request(plate: str = Query("", max_length=128), camera: str = Query("", max_length=128),
                             start: str = Query("", max_length=16), end: str = Query("", max_length=16)) -> RegisterFilters:
-        lower = time_bound(start, display_zone)
-        upper = time_bound(end, display_zone, end=True)
+        saved_zone = store.setting("display_timezone") if persistent else None
+        zone = ZoneInfo(saved_zone) if saved_zone else display_zone
+        lower = time_bound(start, zone)
+        upper = time_bound(end, zone, end=True)
         if lower is not None and upper is not None and (start > end or lower >= upper):
             raise HTTPException(400, "To must be the same minute as From or later.")
-        return RegisterFilters(plate.strip(), camera, start, end, lower, upper)
+        return RegisterFilters(plate.strip(), camera, start, end, lower, upper, zone)
 
     def matching(filters: RegisterFilters, limit: int):
         return store.passages(filters.plate, filters.camera, limit, partial_plate=True,
@@ -631,9 +696,9 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
     @app.get("/", response_class=HTMLResponse)
     def register(filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
         options = ['<option value="">All cameras</option>']
-        for key in CAMERAS:
+        for key in sorted(set(CAMERAS) | store.passage_cameras()):
             selected = " selected" if filters.camera == key else ""
-            options.append(f'<option value="{key}"{selected}>{CAMERA_NAMES[key]}</option>')
+            options.append(f'<option value="{escape(key)}"{selected}>{escape(CAMERA_NAMES.get(key, key))}</option>')
         controls = f'''<form id="register-search" action="/" method="get"><label>Plate <input type="search" name="plate" maxlength="128" value="{escape(filters.plate)}" autocomplete="off" spellcheck="false"></label>
             <label>Camera <select name="camera">{"".join(options)}</select></label>
             <label>From <input type="datetime-local" name="start" value="{escape(filters.start)}"></label>
@@ -648,7 +713,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     def render_results(filters: RegisterFilters) -> str:
         rows = matching(filters, 101)
-        caption = f"Passages · {escape(str(display_zone))}"
+        caption = f"Passages · {escape(str(filters.zone))}"
         if len(rows) > 100:
             caption += " · Latest 100 shown"
         result = []
@@ -660,7 +725,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             if row["photo_id"]:
                 photo = (f'<a href="{link}"><img class="photo" src="/images/{row["photo_id"]}" '
                          f'alt="Vehicle image for {plate_text}" loading="lazy" decoding="async"></a>')
-            capture = datetime.fromtimestamp(row["capture_ms"] / 1000, display_zone)
+            capture = datetime.fromtimestamp(row["capture_ms"] / 1000, filters.zone)
             date = capture.strftime("%d/%m/%Y")
             time = capture.strftime("%H:%M:%S")
             cells = "".join(f'<td data-column="{key}">{escape(row[key]) if row[key] else "—"}</td>'
@@ -684,7 +749,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         if len(rows) > REPORT_LIMIT:
             return HTMLResponse(page("Export", '<p>More than 10,000 passages match. Narrow the date range and try again.</p><p><a href="/">Back to register</a></p>'), status_code=400)
         try:
-            report = excel_report(rows, filters, display_zone, store.image_path)
+            report = excel_report(rows, filters, filters.zone, store.image_path)
         except ReportTooLarge:
             return HTMLResponse(page("Export", '<p>The photos make this report too large. Narrow the date range and try again.</p><p><a href="/">Back to register</a></p>'), status_code=400)
         return Response(report,
@@ -707,7 +772,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             captured = timestamp(packet["capture_ms"])
             history.append(f'<tr><td>{state}</td><td>{read}</td><td>{escape(packet["direction"].title())}</td><td>{captured}</td></tr>')
             for image in packet["images"]:
-                photos.append(f'''<figure><img src="/images/{image['id']}" alt="Synthetic vehicle photo">
+                photos.append(f'''<figure><img src="/images/{image['id']}" alt="Vehicle photo">
                     <figcaption class="muted">{state} packet · {read} · {captured}</figcaption></figure>''')
         no_photo = "<p>Image expired.</p>" if detail["photo_expired"] else "<p>No photo received.</p>"
         return page(detail["plate"], heading + f'''<section><h2>Photos</h2>{"".join(photos) or no_photo}</section>

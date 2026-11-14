@@ -1,22 +1,26 @@
 """Local HTTP receiver for the synthetic PlateLog trial."""
 
+import asyncio
 import base64
 import hmac
 import logging
 import re
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
 from .axis import MAX_BODY_BYTES, PayloadError, media_type, parse_event
+from .credentials import password_matches
 from .store import Store
 
 LOG = logging.getLogger(__name__)
 CAMERAS = ("demo-entry", "demo-exit")
 ID_PATTERN = r"[0-9a-f]{32}"
+CAMERA_ID_PATTERN = r"[a-z0-9][a-z0-9_-]{0,63}"
 
 
 def camera_authorization(camera: str, token: str) -> str:
@@ -28,6 +32,58 @@ def camera_authorization(camera: str, token: str) -> str:
 def authorized(header: str, scheme: str, expected: str) -> bool:
     provided_scheme, _, value = header.partition(" ")
     return provided_scheme.lower() == scheme and hmac.compare_digest(value.encode(), expected.encode())
+
+
+def camera_can_post(store: Store, camera: str, header: str) -> bool:
+    if not re.fullmatch(CAMERA_ID_PATTERN, camera) or camera in CAMERAS:
+        return False
+    config = store.camera(camera)
+    if config is None or config["mode"] == "disabled":
+        return False
+    if config["mode"] == "none":
+        return True
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic" or not value or len(value) > 2048:
+        return False
+    try:
+        username, separator, password = base64.b64decode(value, validate=True).decode("utf-8").partition(":")
+    except ValueError:
+        return False
+    return bool(separator and hmac.compare_digest(username.encode(), config["username"].encode())
+                and password_matches(password, config["verifier"]))
+
+
+def add_camera_intake(app: FastAPI, store: Store, can_post: Callable[[str, str], bool]) -> None:
+    check_credential = asyncio.Lock()
+
+    @app.post("/api/axis/{camera}/events")
+    async def ingest(camera: str, request: Request):
+        async with check_credential:
+            allowed = await run_in_threadpool(can_post, camera, request.headers.get("authorization", ""))
+        if not allowed:
+            raise HTTPException(401, "Camera credential required", headers={"WWW-Authenticate": 'Basic realm="PlateLog"'})
+        content_type = request.headers.get("content-type", "")
+        if media_type(content_type) not in {"application/json", "multipart/form-data"}:
+            raise HTTPException(415, "Expected Axis JSON or multipart")
+        content_length = request.headers.get("content-length")
+        if content_length is not None and (not content_length.isascii() or not content_length.isdecimal()):
+            raise HTTPException(400, "Invalid Content-Length")
+        if content_length is not None and (len(content_length) > 10 or int(content_length) > MAX_BODY_BYTES):
+            raise HTTPException(413, "Axis request exceeds the size limit")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > MAX_BODY_BYTES:
+                raise HTTPException(413, "Axis request exceeds the size limit")
+            body.extend(chunk)
+        try:
+            event = await run_in_threadpool(parse_event, content_type, bytes(body))
+            return await run_in_threadpool(store.save, camera, event)
+        except PayloadError as exc:
+            LOG.warning("Rejected invalid Axis event from %s", camera)
+            raise HTTPException(400, str(exc)) from exc
+        except (sqlite3.Error, OSError) as exc:
+            LOG.error("Could not store Axis event from %s (%s)", camera, type(exc).__name__)
+            raise HTTPException(503, "Event could not be stored") from exc
 
 
 def make_app(data_dir: Path, token: str) -> FastAPI:
@@ -56,34 +112,10 @@ def make_app(data_dir: Path, token: str) -> FastAPI:
     def health():
         return {"status": "ready", "mode": "simulation"}
 
-    @app.post("/api/axis/{camera}/events")
-    async def ingest(camera: str, request: Request):
-        if camera not in CAMERAS or not authorized(
-            request.headers.get("authorization", ""), "basic", camera_authorization(camera, token)[6:]
-        ):
-            raise HTTPException(401, "Camera credential required", headers={"WWW-Authenticate": 'Basic realm="PlateLog"'})
-        content_type = request.headers.get("content-type", "")
-        if media_type(content_type) not in {"application/json", "multipart/form-data"}:
-            raise HTTPException(415, "Expected Axis JSON or multipart")
-        content_length = request.headers.get("content-length")
-        if content_length is not None and (not content_length.isascii() or not content_length.isdecimal()):
-            raise HTTPException(400, "Invalid Content-Length")
-        if content_length is not None and (len(content_length) > 10 or int(content_length) > MAX_BODY_BYTES):
-            raise HTTPException(413, "Axis request exceeds the size limit")
-        body = bytearray()
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > MAX_BODY_BYTES:
-                raise HTTPException(413, "Axis request exceeds the size limit")
-            body.extend(chunk)
-        try:
-            event = await run_in_threadpool(parse_event, content_type, bytes(body))
-            return await run_in_threadpool(store.save, camera, event)
-        except PayloadError as exc:
-            LOG.warning("Rejected invalid Axis event from %s", camera)
-            raise HTTPException(400, str(exc)) from exc
-        except (sqlite3.Error, OSError) as exc:
-            LOG.error("Could not store Axis event from %s (%s)", camera, type(exc).__name__)
-            raise HTTPException(503, "Event could not be stored") from exc
+    def demo_camera_can_post(camera: str, header: str) -> bool:
+        return camera in CAMERAS and authorized(header, "basic", camera_authorization(camera, token)[6:])
+
+    add_camera_intake(app, store, demo_camera_can_post)
 
     @app.get("/api/passages")
     def list_passages(request: Request, plate: str = Query("", max_length=128),
