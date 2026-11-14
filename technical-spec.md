@@ -2,7 +2,7 @@
 
 PlateLog is a local register of vehicle passages reported by Axis License Plate Verifier cameras. It gives authorised staff one place to find a read, see the photo captured with it, and export evidence. Use one FastAPI process, server-rendered HTML with a little JavaScript, SQLite in WAL mode, and JPEG files on a persistent volume. Keep watchlists, charts, trend analysis, and external integrations out of v1.
 
-The [local receiver demo](README.md) is the first implementation milestone. It exercises synthetic camera requests and evidence storage. The browser register, local accounts, exports and retention below describe the planned v1 application.
+The [README](README.md) documents the current implementation and setup. It includes dedicated camera intake on TCP `8766`, the register on TCP `8765`, optional staff sign-in, camera authentication, retention, Excel export and nightly CSV reports. This specification describes the wider v1 design and pilot gates, including planned individual accounts, a timeline and evidence ZIPs.
 
 ## Camera intake
 

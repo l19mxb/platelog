@@ -95,7 +95,23 @@ docker run -d --name platelog --restart unless-stopped --pull=never \
   preview --host 0.0.0.0 --allowed-host '*'
 ```
 
-From a desk that can reach TCP port `8765` on the server, open `http://SERVER-NAME:8765/` using the Linux server's hostname or IPv4 address. This setup recreates the synthetic register on restart. Persistent Admin and retention settings require a writable data volume and an administrator password.
+From a desk that can reach TCP port `8765` on the server, open `http://SERVER-NAME:8765/` using the Linux server's hostname or IPv4 address. This setup recreates the synthetic register on restart.
+
+For an empty, persistent instance with camera intake and Admin settings, load the same image archive and run the following on the Linux host. Use a separate container name or stop the temporary demo to free TCP `8765` first. The image runs as UID and GID `65532`.
+
+```sh
+sudo install -d -m 0750 -o 65532 -g 65532 "$PWD/platelog-data"
+docker run --rm -it --pull=never \
+  --mount "type=bind,source=$PWD/platelog-data,target=/data" \
+  platelog-preview:latest admin-password --data-dir /data
+docker run -d --name platelog --restart unless-stopped --pull=never \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 \
+  --mount "type=bind,source=$PWD/platelog-data,target=/data" \
+  -p 0.0.0.0:8765:8765 -p 0.0.0.0:8766:8766 platelog-preview:latest \
+  preview --host 0.0.0.0 --allowed-host '*' --data-dir /data --no-demo
+```
+
+Sign in to **Admin** on TCP `8765` and register each camera before sending events to TCP `8766`. For scheduled CSV reports, `/data` is writable by default with this setup. An additional destination can be mounted when creating the container.
 
 ## Admin
 
