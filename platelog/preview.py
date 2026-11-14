@@ -28,6 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .credentials import password_matches, password_verifier
+from .daily_csv import export_due_report, report_folder, report_schedule
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .store import Store
 
@@ -47,6 +48,8 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .admin dl { display: grid; grid-template-columns: max-content auto; gap: 4px 18px; }
 .admin dd { margin: 0; } .admin ul { padding-inline-start: 1.4rem; }
 .admin .notice { border-inline-start: 4px solid #194b79; padding-inline-start: 10px; }
+#csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
+#csv-reports code { overflow-wrap: anywhere; }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 form label { display: grid; gap: 4px; font-weight: 600; } input, select, button { font: inherit; padding: 6px 8px; }
@@ -349,6 +352,26 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
         <button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></form>'''
 
 
+def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
+    schedule = report_schedule(store)
+    stored_status = store.setting("daily_csv_status")
+    last = json.loads(stored_status) if stored_status else None
+    result = "<p>No export has run yet.</p>"
+    if last:
+        label = "Last export failed" if last["result"] == "error" else "Last successful export"
+        result = (f'<p>{label} on {escape(last["attempted_at"])}. {escape(last["message"])}</p>'
+                  f'<p><code>{escape(last["file"])}</code></p>')
+    return f'''<section id="csv-reports"><h3>Daily CSV report</h3>
+        <p>Exports the previous calendar day in {escape(zone)}, with a header row and one row per passage.</p>
+        <form method="post" action="/admin/csv-schedule"><input type="hidden" name="csrf" value="{csrf}">
+        <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule['enabled'] else ''}> Enable daily CSV export</label>
+        <label>Run time <input type="time" name="run_time" value="{escape(schedule['run_time'])}" required></label>
+        <label class="destination">Destination folder <input name="folder" value="{escape(schedule['folder'])}" maxlength="1024" spellcheck="false"></label>
+        <p>Use a folder on the server or a Windows UNC share that the PlateLog service account can write to.
+        PlateLog names each file <code>platelog-YYYY-MM-DD.csv</code>.</p>
+        <button type="submit">Save CSV schedule</button></form>{result}</section>'''
+
+
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
                  change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo,
@@ -389,6 +412,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         last = store.setting("retention_last_run")
         changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
         cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"]) for row in store.cameras())
+        zone = store.setting("display_timezone") or str(display_zone)
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Staff web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
@@ -411,7 +435,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return show(f'''<p class="notice" role="status">{escape(message)}</p>{restart_form}
             <section><h3>Display</h3><form method="post" action="/admin/timezone">
             <input type="hidden" name="csrf" value="{csrf}">
-            <label>Time zone <input name="timezone" maxlength="128" value="{escape(store.setting('display_timezone') or str(display_zone))}" required></label>
+            <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
             <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
             <section><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
             <p>
@@ -431,6 +455,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
             Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
             <button type="submit">Purge now</button></form></section>
+            {csv_schedule_form(store, csrf, zone)}
             <section><h3>Change administrator password</h3>
             <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
             <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
@@ -446,7 +471,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <button type="submit">Sign out</button></form></section>''', status)
 
     @app.get("/admin", response_class=HTMLResponse)
-    def admin(request: Request, saved: bool = False, password_changed: bool = False):
+    def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -455,7 +480,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             return show("<p>Set an administrator password on the server to activate this tab.</p>")
         csrf = authenticated(request)
         if csrf:
-            return dashboard(csrf, "Retention settings saved." if saved else "")
+            message = "CSV schedule saved." if csv_saved else "Retention settings saved." if saved else ""
+            return dashboard(csrf, message)
         return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
     @app.post("/admin/login")
@@ -510,6 +536,26 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         activity = f"Retention saved: {days['passage_days']} days for passages, {days['photo_days']} for photos, cleanup {'on' if enabled else 'off'}"
         await run_in_threadpool(store.set_setting, "retention", settings, activity)
         return RedirectResponse("/admin?saved=true", status_code=303)
+
+    @app.post("/admin/csv-schedule")
+    async def save_csv_schedule(request: Request):
+        csrf, fields = await authorized_form(request, limit=16_384)
+        run_time = fields.get("run_time", "")
+        folder = fields.get("folder", "").strip()
+        enabled = fields.get("enabled") == "yes"
+        if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", run_time):
+            return dashboard(csrf, "Enter a run time between 00:00 and 23:59.", 400)
+        if len(folder) > 1024:
+            return dashboard(csrf, "Use a destination folder of at most 1024 characters.", 400)
+        if enabled or folder:
+            try:
+                folder = str(report_folder(folder))
+            except ValueError as exc:
+                return dashboard(csrf, str(exc), 400)
+        schedule = json.dumps({"enabled": enabled, "run_time": run_time, "folder": folder})
+        activity = "Daily CSV schedule enabled" if enabled else "Daily CSV schedule disabled"
+        await run_in_threadpool(store.set_setting, "daily_csv_schedule", schedule, activity)
+        return RedirectResponse("/admin?csv_saved=true#csv-reports", status_code=303)
 
     @app.post("/admin/purge")
     async def purge(request: Request):
@@ -666,16 +712,25 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                 LOG.exception("PlateLog retention failed")
             await asyncio.sleep(3600)
 
+    async def supervise_csv():
+        while True:
+            try:
+                await run_in_threadpool(export_due_report, store, display_zone)
+            except Exception:
+                LOG.exception("PlateLog daily CSV export failed")
+            await asyncio.sleep(30)
+
     @asynccontextmanager
     async def lifespan(_app):
-        cleanup = asyncio.create_task(supervise_retention()) if persistent else None
+        tasks = [asyncio.create_task(job()) for job in (supervise_retention, supervise_csv)] if persistent else []
         try:
             yield
         finally:
-            if cleanup:
-                cleanup.cancel()
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
                 with suppress(asyncio.CancelledError):
-                    await cleanup
+                    await task
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)

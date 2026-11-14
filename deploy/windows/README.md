@@ -32,6 +32,10 @@ Keep RDP access under the existing IT policy. The preview needs no outbound Inte
 
 To change the staff web port, allow the new TCP port in the firewall first, then open **Admin → Service** and choose **Save port and restart**. The setup firewall rule covers TCP `8765`. PlateLog uses that startup port as a fallback if the saved web port is occupied when the service starts.
 
+## Daily CSV reports
+
+In **Admin → Daily CSV report**, set the time and destination folder. For a remote destination, use a UNC path such as `\\fileserver\reports\PlateLog`. The bundled service runs as `LocalService`, which connects to network shares anonymously. For a protected share, IT can run PlateLog under an account with write access to the share and access to PlateLog's local data and logs. [Microsoft guidance on LocalService](https://learn.microsoft.com/en-us/windows/win32/services/localservice-account) · [Microsoft guidance on mapped drives and services](https://learn.microsoft.com/en-us/windows/win32/services/services-and-redirected-drives)
+
 ## Backup and removal
 
 Stop the service, copy the entire data directory to approved storage, then start the service again. To remove the preview, run the following from an administrator PowerShell. Keep or dispose of the data under the site's retention policy.

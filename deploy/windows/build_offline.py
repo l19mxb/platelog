@@ -14,7 +14,7 @@ APP_FILES = (
     "README.md", "LICENSE", "technical-spec.md", "requirements.txt", "deploy/windows/README.md",
     "docs/images/register.png", "docs/images/register-search.png",
     "deploy/windows/PlateLog.xml", "platelog/__init__.py", "platelog/__main__.py",
-    "platelog/axis.py", "platelog/credentials.py", "platelog/preview.py", "platelog/receiver.py",
+    "platelog/axis.py", "platelog/credentials.py", "platelog/daily_csv.py", "platelog/preview.py", "platelog/receiver.py",
     "platelog/simulator.py", "platelog/store.py", "platelog/fixtures/entry.jpg",
     "platelog/fixtures/exit.jpg", "tests/test_receiver.py",
 )

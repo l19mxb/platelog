@@ -344,6 +344,14 @@ class Store:
             ).fetchall()
             return [self._summary(db, row) for row in rows]
 
+    def report_passages(self, start_ms: int, end_ms: int):
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            rows = db.execute("SELECT * FROM passages WHERE first_ms>=? AND first_ms<? ORDER BY first_ms, id",
+                              (start_ms, end_ms))
+            for row in rows:
+                yield self._summary(db, row)
+
     def detail(self, passage: str) -> dict | None:
         with closing(self.connect()) as db:
             db.execute("BEGIN")
