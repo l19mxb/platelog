@@ -16,7 +16,7 @@ from html import escape
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode, urlsplit
 from xml.sax.saxutils import escape as xml_escape
 from zipfile import ZIP_DEFLATED, ZipFile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -103,6 +103,10 @@ if (form) {
         status.textContent = '';
         try {
             const response = await fetch(`/register/results${query}`, { signal: request.signal });
+            if (response.status === 401 && request === pending) {
+                window.location.assign(`/login?${new URLSearchParams({ next: `/${query}` })}`);
+                return;
+            }
             if (response.status === 400) throw new Error((await response.json()).detail);
             if (!response.ok) throw new Error('Could not update results. Try Search again.');
             const html = await response.text();
@@ -148,6 +152,7 @@ VEHICLE_COLUMNS = ("make", "model", "colour")
 REPORT_LIMIT = 10_000
 SESSION_SECONDS = 8 * 60 * 60
 ADMIN_COOKIE = "platelog_admin"
+STAFF_COOKIE = "platelog_staff"
 LOG = logging.getLogger(__name__)
 PHOTO_BUDGET = 32 * 1024 * 1024
 OOXML = "http://schemas.openxmlformats.org/"
@@ -372,30 +377,146 @@ def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
         <button type="submit">Save CSV schedule</button></form>{result}</section>'''
 
 
+def register_destination(value: str) -> str:
+    if len(value) > 2048 or not value.startswith("/") or "\\" in value or any(ord(char) < 32 for char in value):
+        return "/"
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        return "/"
+    if url.netloc or url.scheme or url.fragment or value.startswith("//"):
+        return "/"
+    if url.path == "/" or re.fullmatch(r"/passages/[a-f0-9]{32}", url.path):
+        return value
+    return "/"
+
+
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
                  change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo,
-                 camera_port: int | None, camera_online: bool, change_camera_port: Callable[[int], None] | None) -> None:
+                 camera_port: int | None, camera_online: bool, change_camera_port: Callable[[int], None] | None):
     sessions: dict[str, tuple[float, str, str]] = {}
+    staff_sessions: dict[str, tuple[float, str, str]] = {}
     login_attempts: list[float] = []
+    staff_attempts: list[float] = []
     password_check = asyncio.Lock()
     restarting = False
 
     def transport_ok(request: Request) -> bool:
         return allow_http_admin or request.url.scheme == "https"
 
-    def session_key(request: Request) -> str:
-        token = request.cookies.get(ADMIN_COOKIE, "")
+    def session_key(request: Request, cookie: str = ADMIN_COOKIE) -> str:
+        token = request.cookies.get(cookie, "")
         return hashlib.sha256(token.encode()).hexdigest() if len(token) == 43 else ""
 
     def credential(request: Request) -> str | None:
         return store.setting("admin_password") if persistent and transport_ok(request) else None
 
-    def authenticated(request: Request) -> str | None:
-        state = sessions.get(session_key(request))
-        if state and time.monotonic() < state[0] and state[2] == credential(request):
+    def session_csrf(state: tuple[float, str, str] | None, revision: str | None) -> str | None:
+        if state and time.monotonic() < state[0] and state[2] == revision:
             return state[1]
         return None
+
+    def admin_csrf(request: Request) -> str | None:
+        state = sessions.get(session_key(request))
+        return session_csrf(state, credential(request)) if state else None
+
+    def staff_csrf(request: Request, config: dict) -> str | None:
+        if config["required"] and transport_ok(request):
+            return session_csrf(staff_sessions.get(session_key(request, STAFF_COOKIE)), config["revision"])
+        return None
+
+    def authenticated(request: Request) -> str | None:
+        if csrf := admin_csrf(request):
+            return csrf
+        if persistent and request.cookies.get(STAFF_COOKIE):
+            config = store.register_access()
+            if config["staff_admin"]:
+                return staff_csrf(request, config)
+        return None
+
+    def require_register(request: Request) -> None:
+        if not persistent:
+            return
+        config = store.register_access()
+        if not config["required"] or admin_csrf(request) or staff_csrf(request, config):
+            return
+        if request.url.path == "/" or request.url.path.startswith("/passages/"):
+            destination = request.url.path
+            if request.url.query:
+                destination += "?" + request.url.query
+            raise HTTPException(303, headers={"Location": "/login?" + urlencode({"next": register_destination(destination)})})
+        raise HTTPException(401, "Sign in to view the register.")
+
+    def sign_in(request: Request, destination: str, cookie: str, active: dict, revision: str) -> RedirectResponse:
+        now = time.monotonic()
+        for key in list(active):
+            if active[key][0] <= now or active[key][2] != revision:
+                del active[key]
+        active.pop(session_key(request, cookie), None)
+        if len(active) >= 32:
+            active.pop(next(iter(active)))
+        token = secrets.token_urlsafe(32)
+        active[hashlib.sha256(token.encode()).hexdigest()] = (now + SESSION_SECONDS, secrets.token_urlsafe(32), revision)
+        response = RedirectResponse(destination, status_code=303)
+        response.set_cookie(cookie, token, path="/", httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https", max_age=SESSION_SECONDS)
+        if cookie == ADMIN_COOKIE:
+            response.delete_cookie(cookie, path="/admin", secure=request.url.scheme == "https", httponly=True, samesite="strict")
+        return response
+
+    def sign_out(request: Request, destination: str, cookie: str, active: dict) -> RedirectResponse:
+        active.pop(session_key(request, cookie), None)
+        response = RedirectResponse(destination, status_code=303)
+        response.delete_cookie(cookie, path="/", secure=request.url.scheme == "https", httponly=True, samesite="strict")
+        return response
+
+    def register_login_page(destination: str, message: str = "", status: int = 200) -> HTMLResponse:
+        notice = f'<p role="alert">{escape(message)}</p>' if message else ""
+        return HTMLResponse(page("Staff sign-in", f'''<section><h2>Staff sign-in</h2>{notice}
+            <form method="post" action="/login"><input type="hidden" name="next" value="{escape(destination)}">
+            <label>Staff password <input type="password" name="password" autocomplete="current-password" required></label>
+            <button type="submit">Sign in</button></form></section>'''), status_code=status)
+
+    @app.get("/login")
+    def register_login(request: Request, next: str = "/"):
+        destination = register_destination(next)
+        config = store.register_access() if persistent else None
+        if not config or not config["required"] or admin_csrf(request) or staff_csrf(request, config):
+            return RedirectResponse(destination, status_code=303)
+        if not transport_ok(request):
+            return HTMLResponse(page("Staff sign-in", "<p>This server requires HTTPS for staff sign-in.</p>"), status_code=403)
+        return register_login_page(destination)
+
+    @app.post("/login")
+    async def register_sign_in(request: Request):
+        fields = await admin_form(request, limit=12_288)
+        destination = register_destination(fields.get("next", ""))
+        config = store.register_access() if persistent else None
+        if not config or not config["required"]:
+            return RedirectResponse(destination, status_code=303)
+        if not transport_ok(request):
+            raise HTTPException(403, "Staff sign-in requires HTTPS.")
+        now = time.monotonic()
+        staff_attempts[:] = [attempt for attempt in staff_attempts if now - attempt < 300]
+        if len(staff_attempts) >= 5:
+            return register_login_page(destination, "Too many attempts. Try again in five minutes.", 429)
+        staff_attempts.append(now)
+        async with password_check:
+            if (not await run_in_threadpool(password_matches, fields.get("password", ""), config["verifier"])
+                    or config["revision"] != store.register_access()["revision"]):
+                return register_login_page(destination, "Incorrect staff password.", 401)
+            staff_attempts.clear()
+        return sign_in(request, destination, STAFF_COOKIE, staff_sessions, config["revision"])
+
+    @app.post("/logout")
+    async def register_logout(request: Request):
+        fields = await admin_form(request)
+        config = store.register_access() if persistent else None
+        csrf = staff_csrf(request, config) if config else None
+        if not csrf or not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
+            raise HTTPException(403, "Reload the register before signing out.")
+        return sign_out(request, "/", STAFF_COOKIE, staff_sessions)
 
     def show(content: str, status: int = 200) -> HTMLResponse:
         return HTMLResponse(page("Admin", f'<div class="admin"><h2>Admin</h2>{content}</div>'), status_code=status)
@@ -432,7 +553,26 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         camera_help = "Use the camera port and the POST path shown for each camera."
         if not change_camera_port:
             camera_help += " In Docker, use the published camera port on the host."
-        return show(f'''<p class="notice" role="status">{escape(message)}</p>{restart_form}
+        access_form = ""
+        owner = any(state[1] == csrf for state in sessions.values())
+        if owner:
+            access = store.register_access()
+            password_note = "Leave blank to keep the current staff password." if access["verifier"] else "Use at least 14 characters."
+            access_form = f'''<section id="register-access"><h3>Register access</h3>
+                <form method="post" action="/admin/register-access"><input type="hidden" name="csrf" value="{csrf}">
+                <label class="enable"><input type="checkbox" name="required" value="yes" {'checked' if access['required'] else ''}> Require staff sign-in to view the register</label>
+                <label class="enable"><input type="checkbox" name="staff_admin" value="yes" {'checked' if access['staff_admin'] else ''}> Allow staff to open Admin settings</label>
+                <label>New staff password <input type="password" name="password" minlength="14" autocomplete="new-password"></label>
+                <button type="submit">Save register access</button></form>
+                <p>{password_note} Staff access to Admin includes camera settings, retention, and service controls.
+                The administrator password controls sign-in settings.</p></section>'''
+        password_form = f'''<section><h3>Change administrator password</h3>
+            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
+            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
+            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
+            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
+            <button type="submit">Change password</button></form></section>''' if owner else ""
+        return show(f'''<p class="notice" role="status">{escape(message)}</p>{access_form}{restart_form}
             <section><h3>Display</h3><form method="post" action="/admin/timezone">
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
@@ -455,13 +595,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
             Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
             <button type="submit">Purge now</button></form></section>
-            {csv_schedule_form(store, csrf, zone)}
-            <section><h3>Change administrator password</h3>
-            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
-            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
-            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
-            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
-            <button type="submit">Change password</button></form></section>
+            {csv_schedule_form(store, csrf, zone)}{password_form}
             <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
             <dt>Events</dt><dd>{counts['packets']:,}</dd>
             <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
@@ -471,7 +605,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <button type="submit">Sign out</button></form></section>''', status)
 
     @app.get("/admin", response_class=HTMLResponse)
-    def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False):
+    def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False,
+              access_saved: bool = False):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -480,7 +615,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             return show("<p>Set an administrator password on the server to activate this tab.</p>")
         csrf = authenticated(request)
         if csrf:
-            message = "CSV schedule saved." if csv_saved else "Retention settings saved." if saved else ""
+            message = ("Register access saved." if access_saved else "CSV schedule saved." if csv_saved else
+                       "Retention settings saved." if saved else "")
             return dashboard(csrf, message)
         return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
@@ -500,27 +636,29 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                     or not await run_in_threadpool(password_matches, fields.get("password", ""), verifier)):
                 return login_page("Incorrect password.", 401)
             login_attempts.clear()
-        for key in list(sessions):
-            if sessions[key][0] <= now or sessions[key][2] != verifier:
-                del sessions[key]
-        sessions.pop(session_key(request), None)
-        if len(sessions) >= 32:
-            sessions.pop(next(iter(sessions)))
-        token = secrets.token_urlsafe(32)
-        sessions[hashlib.sha256(token.encode()).hexdigest()] = (now + SESSION_SECONDS, secrets.token_urlsafe(32), verifier)
-        response = RedirectResponse("/admin", status_code=303)
-        response.set_cookie(ADMIN_COOKIE, token, path="/admin", httponly=True, samesite="strict",
-                            secure=request.url.scheme == "https", max_age=SESSION_SECONDS)
-        return response
+        return sign_in(request, "/admin", ADMIN_COOKIE, sessions, verifier)
 
-    async def authorized_form(request: Request, limit: int = 4096) -> tuple[str, dict[str, str]]:
-        csrf = authenticated(request)
+    async def authorized_form(request: Request, limit: int = 4096, *, owner_only: bool = False) -> tuple[str, dict[str, str]]:
+        csrf = admin_csrf(request) if owner_only else authenticated(request)
         if not csrf:
             raise HTTPException(403, "Sign in as administrator.")
         fields = await admin_form(request, limit)
         if not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
             raise HTTPException(403, "Reload the Admin page before submitting.")
         return csrf, fields
+
+    @app.post("/admin/register-access")
+    async def save_register_access(request: Request):
+        csrf, fields = await authorized_form(request, owner_only=True)
+        required = fields.get("required") == "yes"
+        staff_admin = fields.get("staff_admin") == "yes"
+        password = fields.get("password", "")
+        try:
+            verifier = await run_in_threadpool(password_verifier, password) if password else ""
+            await run_in_threadpool(store.set_register_access, required, staff_admin, verifier)
+        except ValueError as exc:
+            return dashboard(csrf, str(exc), 400)
+        return RedirectResponse("/admin?access_saved=true#register-access", status_code=303)
 
     @app.post("/admin/settings")
     async def save_retention(request: Request):
@@ -609,15 +747,15 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     @app.post("/admin/logout")
     async def logout(request: Request):
         await authorized_form(request)
-        sessions.pop(session_key(request), None)
-        response = RedirectResponse("/admin", status_code=303)
-        response.delete_cookie(ADMIN_COOKIE, path="/admin", secure=request.url.scheme == "https", httponly=True, samesite="strict")
+        staff_sessions.pop(session_key(request, STAFF_COOKIE), None)
+        response = sign_out(request, "/admin", ADMIN_COOKIE, sessions)
+        response.delete_cookie(STAFF_COOKIE, path="/", secure=request.url.scheme == "https", httponly=True, samesite="strict")
         return response
 
     @app.post("/admin/password")
     async def change_password(request: Request):
         current = credential(request)
-        csrf, fields = await authorized_form(request, limit=10_240)
+        csrf, fields = await authorized_form(request, limit=10_240, owner_only=True)
         value = fields.get("new_password", "")
         if value != fields.get("confirm_password"):
             return dashboard(csrf, "The new passwords did not match.", 400)
@@ -634,9 +772,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 raise HTTPException(403, "Sign in again to change the password.")
             sessions.clear()
             login_attempts.clear()
-        response = RedirectResponse("/admin?password_changed=true", status_code=303)
-        response.delete_cookie(ADMIN_COOKIE, path="/admin", secure=request.url.scheme == "https", httponly=True, samesite="strict")
-        return response
+        return sign_out(request, "/admin?password_changed=true", ADMIN_COOKIE, sessions)
 
     def restart_response(destination: str = "/admin"):
         response = show(f'<p>PlateLog is restarting. <a href="{escape(destination)}">Open Admin</a> in a moment to sign in again.</p>', 202)
@@ -694,6 +830,16 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return await save_port(request, "camera POST", camera_port if camera_online else None, web_port,
                                change_camera_port, move_admin=False)
 
+    def register_sign_out_form(request: Request) -> str:
+        if persistent and request.cookies.get(STAFF_COOKIE):
+            csrf = staff_csrf(request, store.register_access())
+            if csrf:
+                return (f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{csrf}">'
+                        '<button type="submit">Sign out</button></form>')
+        return ""
+
+    return require_register, register_sign_out_form
+
 
 def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | ZoneInfo = timezone.utc,
                  *, persistent: bool = False, allow_http_admin: bool = True,
@@ -734,8 +880,11 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
-    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone,
-                 camera_port, camera_online, change_camera_port)
+    require_register, register_sign_out_form = admin_routes(
+        app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone,
+        camera_port, camera_online, change_camera_port,
+    )
+    signed_in = [Depends(require_register)]
 
     @app.middleware("http")
     async def preview_headers(request: Request, call_next):
@@ -771,8 +920,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         return store.passages(filters.plate, filters.camera, limit, partial_plate=True,
                               start_ms=filters.start_ms, end_ms=filters.end_ms)
 
-    @app.get("/", response_class=HTMLResponse)
-    def register(filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
+    @app.get("/", response_class=HTMLResponse, dependencies=signed_in)
+    def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
         options = ['<option value="">All cameras</option>']
         for key in sorted(set(CAMERAS) | store.passage_cameras()):
             selected = " selected" if filters.camera == key else ""
@@ -786,7 +935,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         toggles = "".join(f'<label><input type="checkbox" id="show-{key}" data-column-toggle="{key}" checked> {key.title()}</label>'
                           for key in VEHICLE_COLUMNS)
         toolbar = f'<div class="toolbar">{controls}<fieldset><legend>Columns</legend>{toggles}</fieldset></div>'
-        return page("Register", toolbar + '<p id="search-status" role="status"></p>' +
+        return page("Register", register_sign_out_form(request) + toolbar + '<p id="search-status" role="status"></p>' +
                     f'<div id="register-results">{render_results(filters)}</div>')
 
     def render_results(filters: RegisterFilters) -> str:
@@ -817,11 +966,11 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             <thead><tr><th scope="col">Image</th><th scope="col">Reg</th><th scope="col">Date</th><th scope="col">Time</th>{headings}</tr></thead>
             <tbody>{"".join(result)}</tbody></table></div>'''
 
-    @app.get("/register/results", response_class=HTMLResponse)
+    @app.get("/register/results", response_class=HTMLResponse, dependencies=signed_in)
     def register_results(filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
         return render_results(filters)
 
-    @app.get("/register/export")
+    @app.get("/register/export", dependencies=signed_in)
     def export_register(filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
         rows = matching(filters, REPORT_LIMIT + 1)
         if len(rows) > REPORT_LIMIT:
@@ -834,7 +983,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         headers={"Content-Disposition": 'attachment; filename="platelog-report.xlsx"'})
 
-    @app.get("/passages/{passage_id}", response_class=HTMLResponse)
+    @app.get("/passages/{passage_id}", response_class=HTMLResponse, dependencies=signed_in)
     def passage(passage_id: str):
         detail = store.detail(passage_id) if re.fullmatch(ID_PATTERN, passage_id) else None
         if detail is None:
@@ -857,7 +1006,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             <section><h2>Packet history</h2><div class="scroll"><table><thead><tr><th>Event</th><th>Plate read</th><th>Direction</th><th>Captured (UTC)</th></tr></thead>
             <tbody>{"".join(history)}</tbody></table></div></section>''')
 
-    @app.get("/images/{image_id}")
+    @app.get("/images/{image_id}", dependencies=signed_in)
     def image(image_id: str):
         path = store.image_path(image_id) if re.fullmatch(ID_PATTERN, image_id) else None
         if path is None:
