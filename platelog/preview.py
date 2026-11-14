@@ -355,10 +355,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     password_check = asyncio.Lock()
 
     def transport_ok(request: Request) -> bool:
-        return request.url.scheme == "https" or allow_http_admin or (
-            request.url.hostname in {"localhost", "127.0.0.1"} and request.client is not None
-            and request.client.host in {"127.0.0.1", "::1"}
-        )
+        return allow_http_admin or request.url.scheme == "https"
 
     def session_key(request: Request) -> str:
         token = request.cookies.get(ADMIN_COOKIE, "")
@@ -406,7 +403,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
-            return show("<p>Admin sign-in needs HTTPS or the server's trusted-LAN HTTP setting.</p>")
+            return show("<p>This server requires HTTPS for Admin sign-in.</p>")
         if not credential(request):
             return show("<p>Set an administrator password on the server to activate this tab.</p>")
         csrf = authenticated(request)
@@ -475,7 +472,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
 
 
 def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | ZoneInfo = timezone.utc,
-                 *, persistent: bool = False, allow_http_admin: bool = False) -> FastAPI:
+                 *, persistent: bool = False, allow_http_admin: bool = True) -> FastAPI:
     if allowed_host != "*" and not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", allowed_host):
         raise ValueError("Expected a hostname, IPv4 address, or '*' for --allowed-host")
     store = Store(data_dir)

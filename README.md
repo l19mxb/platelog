@@ -102,7 +102,7 @@ python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney
 
 Open **Admin** and sign in. Set separate limits for passages and photos, see stored counts and photo storage, and review recent admin changes. Cleanup starts disabled. After you turn it on, it runs at startup and hourly. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label.
 
-Admin sign-in works over HTTP on the same computer as PlateLog. On an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST --allow-http-admin` to the preview command. Keep `--data-dir` and set the admin password first. HTTP does not encrypt the password or session. For HTTPS, use `--tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command can reset the password and invalidates active sessions. This preview uses simulated camera data and a single administrator password.
+Admin sign-in works over HTTP once a password is set in the persistent data directory. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries the password and session cookie in clear text. To require HTTPS, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command can reset the password and invalidates active sessions. This preview uses simulated camera data and a single administrator password.
 
 For a native Windows Server preview with no Internet access, see the [offline bundle and Windows service setup](deploy/windows/README.md).
 

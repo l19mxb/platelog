@@ -181,6 +181,6 @@ try {
 }
 
 Write-Host "PlateLog register  http://$($env:COMPUTERNAME):$port/"
-Write-Host "PlateLog Admin     http://127.0.0.1:$port/admin (from RDP)"
+Write-Host "PlateLog Admin     http://$($env:COMPUTERNAME):$port/admin"
 if ($SkipFirewall) { Write-Host 'Have IT allow inbound TCP 8765 for the desks through its firewall policy.' }
 else { Write-Host "Inbound rule added for TCP $port from $($RemoteAddress -join ', ')." }

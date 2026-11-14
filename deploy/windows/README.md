@@ -14,11 +14,11 @@ The x64 ZIP includes a signed Python 3.13.17 offline installer, WinSW 2.12.0 for
 
    Setup checks the bundle, installs Python if required, installs the locked dependencies offline, registers and starts the `PlateLog` service, and checks `/healthz`. The service starts at boot under `LocalService`. Code lives under `%ProgramFiles%\PlateLog`. Data and logs live under `%ProgramData%\PlateLog`. Setup is for a fresh install and stops if it finds an existing one.
 
-4. From another desk, open `http://SERVER-NAME:8765/` using the server's hostname or IPv4 address. Check the two sample rows and photos, search for `AO1`, and open the Excel report. Inside RDP, open `http://127.0.0.1:8765/admin` to sign in and change retention settings.
+4. From another desk, open `http://SERVER-NAME:8765/` using the server's hostname or IPv4 address. Check the two sample rows and photos, search for `AO1`, and open the Excel report. Open **Admin** at the same address and use the password set during setup to change retention settings.
 
 ## Network access
 
-The preview listens on all IPv4 interfaces (`0.0.0.0:8765`). Setup adds a Windows Firewall allow rule for the PlateLog listener on TCP 8765 from `Any` source by default. Routing, network firewalls and Group Policy still determine which desks can connect. The register, photos and Excel export are available to anyone who can reach the listener. This bundle contains only synthetic plates. Admin sign-in uses localhost inside RDP. [Windows Firewall rule address and port scoping](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
+The preview listens on all IPv4 interfaces (`0.0.0.0:8765`). Setup adds a Windows Firewall allow rule for the PlateLog listener on TCP 8765 from `Any` source by default. Routing, network firewalls and Group Policy still determine which desks can connect. The register, photos and Excel export are available to anyone who can reach the listener. This bundle contains only synthetic plates. Admin requires the password set during setup. HTTP carries the password and session cookie in clear text. [Windows Firewall rule address and port scoping](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
 
 To limit the rule to selected desks or subnets, substitute the real addresses in this example:
 

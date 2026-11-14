@@ -60,7 +60,11 @@ def main() -> None:
     preview.add_argument("--data-dir", type=Path, help="Persistent preview data and admin settings")
     preview.add_argument("--tls-cert", type=Path, help="PEM certificate for HTTPS")
     preview.add_argument("--tls-key", type=Path, help="PEM private key for HTTPS")
-    preview.add_argument("--allow-http-admin", action="store_true", help="Allow password-protected Admin over HTTP on a trusted LAN")
+    admin_transport = preview.add_mutually_exclusive_group()
+    admin_transport.add_argument("--allow-http-admin", action="store_true", default=True,
+                                 help="Allow password-protected Admin over HTTP (default)")
+    admin_transport.add_argument("--require-https-admin", action="store_false", dest="allow_http_admin",
+                                 help="Require HTTPS for Admin sign-in")
     password = commands.add_parser("admin-password", help="Set or reset the administrator password in a data directory")
     password.add_argument("--data-dir", type=Path, required=True)
     serve = commands.add_parser("serve", help="Start a persistent local demo receiver")
@@ -95,8 +99,6 @@ def main() -> None:
                 parser.error(f"Unknown time zone: {args.timezone}")
             if bool(args.tls_cert) != bool(args.tls_key):
                 parser.error("Supply both --tls-cert and --tls-key for HTTPS.")
-            if args.allow_http_admin and not args.data_dir:
-                parser.error("--allow-http-admin requires a persistent --data-dir.")
             scratch = nullcontext(args.data_dir) if args.data_dir else tempfile.TemporaryDirectory(prefix="platelog-preview-")
             with scratch as directory:
                 data_dir = Path(directory)
