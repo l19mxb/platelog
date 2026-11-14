@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!requirements.txt
+!platelog/
+!platelog/*.py
+!platelog/fixtures/
+!platelog/fixtures/*.jpg

@@ -1,0 +1,94 @@
+# PlateLog
+
+PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected retention settings. A separate receiver and simulator exercise Axis-style HTTP pushes, including plate corrections and duplicate packets. Connecting a real camera to the browser register remains part of the planned pilot in the [v1 specification](technical-spec.md).
+
+## Quick start
+
+With Python 3.12 or 3.13 installed, run the following from the repository root, then open `http://127.0.0.1:8765/`:
+
+```sh
+python -m pip install -r requirements.txt
+python -m platelog preview
+```
+
+## Run the demo
+
+From this directory, with Python 3.12 or newer:
+
+```sh
+python -m pip install -r requirements.txt
+python -m platelog demo
+```
+
+The demo starts a temporary HTTP server on `127.0.0.1`, sends simulated camera payloads, and shuts down. It uses two fictitious cameras, generated JPEGs marked as synthetic, and a temporary SQLite database. It exits with an error if any expected outcome fails.
+
+| Case | Expected result |
+| --- | --- |
+| JSON with an embedded JPEG | The saved JPEG matches the original bytes and SHA-256. |
+| Replay of the same packet | The receiver returns the original packet and passage IDs. |
+| Plate correction arrives after the closing event | The entry shows `DEMO-A01`, direction `in`, three packets, and the original photo. The initial OCR text `DEMO-AO1` remains searchable. |
+| A second camera sends multipart metadata and a JPEG | The exit shows `DEMO-B02`, direction `out`, and its own photo, even though both cameras use runtime ID `42`. |
+| Unauthenticated photo request and invalid payload | The server returns HTTP `401` and `400` respectively. |
+
+The simulator follows the documented Axis push fields. The multipart fixture represents a JSON part and a separate JPEG. A real payload from the candidate firmware is still needed to confirm wire compatibility, camera authentication, buffering and the passage correlation window. [Axis push event API](https://developer.axis.com/vapix/applications/license-plate-verifier-api/#push-events)
+
+## Keep a local demo running
+
+Set `PLATELOG_DEMO_TOKEN` to the same randomly generated value of at least 24 URL-safe characters in both terminals. Start the server in the first terminal:
+
+```sh
+python -m platelog serve
+```
+
+Send and verify the synthetic sequence in the second terminal:
+
+```sh
+python -m platelog simulate
+```
+
+Use the returned passage ID to read its history. For example, in PowerShell:
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:PLATELOG_DEMO_TOKEN" }
+Invoke-RestMethod -Headers $headers 'http://127.0.0.1:8765/api/passages?camera=demo-entry'
+```
+
+The server binds to loopback and stores this mode’s data in `.platelog-data/` by default. The temporary `demo` command is the quickest way to get a fresh run. For the storage and parser regression tests, run `python -m unittest discover -s tests -v`.
+
+## Open the browser preview
+
+Run `python -m platelog preview --timezone Australia/Sydney`, then open `http://127.0.0.1:8765/`. Type part of a registration to filter the list as you type. Enter `AO1` to find the corrected entry by its original OCR read. Click its thumbnail or registration to open the original photo and packet history. Use the Columns controls to hide or show Make, Model or Colour. The browser remembers these settings.
+
+Set **From** and **To** to filter by the passage's first capture time in the displayed time zone. The selected **To** minute is included. Leave either bound blank to search without that limit. Choose **Export Excel** to download a summary with counts by camera and one row per matching passage. The Passages sheet embeds the register thumbnail before the registration. Open the register to see full-size photos. If a report exceeds 10,000 matches or 32 MiB of thumbnails, narrow the time range and try again.
+
+The browser preview uses a fresh database unless you specify `--data-dir`. The two JPEG fixtures are generated images of front-facing vehicles with fictitious plates. The simulator supplies make, model and colour. Missing fields appear as a dash. Axis documents colour in `vehicle_info`. Make and model require a source that supplies them. A Docker image can serve the same preview:
+
+```sh
+docker build -t platelog-preview .
+docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 -p 127.0.0.1:8765:8765 platelog-preview
+```
+
+For a LAN demo, publish `8765:8765` and pass `preview --host 0.0.0.0 --allowed-host SERVER_NAME` after the image name. Use the server hostname or IPv4 address in place of `SERVER_NAME`. Anyone who can reach the listener can view and export the sample register.
+
+## Admin
+
+Set a password interactively, then start the preview with the same persistent directory:
+
+```sh
+python -m platelog admin-password --data-dir .platelog-data
+python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney
+```
+
+Open **Admin** and sign in. Set separate limits for passages and photos, see stored counts and photo storage, and review recent admin changes. Cleanup starts disabled. After you turn it on, it runs at startup and hourly. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label.
+
+Admin sign-in works over HTTP on the same computer as PlateLog. On an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST --allow-http-admin` to the preview command. Keep `--data-dir` and set the admin password first. HTTP does not encrypt the password or session. For HTTPS, use `--tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command can reset the password and invalidates active sessions. This preview uses simulated camera data and a single administrator password.
+
+For a native Windows Server preview with no Internet access, see the [offline bundle and Windows service setup](deploy/windows/README.md).
+
+## Suggested workplace trial
+
+Review the register and export with the supplied synthetic captures. The demo runs without access to the camera network. If the workflow fits, arrange a controlled vehicle pass with one Axis camera and the site's agreed access and retention settings.
+
+## License
+
+PlateLog is available under the [MIT License](LICENSE).
