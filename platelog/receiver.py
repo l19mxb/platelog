@@ -12,6 +12,7 @@ from typing import Callable
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .axis import MAX_BODY_BYTES, PayloadError, media_type, parse_event
 from .credentials import password_matches
@@ -21,6 +22,7 @@ LOG = logging.getLogger(__name__)
 CAMERAS = ("demo-entry", "demo-exit")
 ID_PATTERN = r"[0-9a-f]{32}"
 CAMERA_ID_PATTERN = r"[a-z0-9][a-z0-9_-]{0,63}"
+DEFAULT_CAMERA_PORT = 8766
 
 
 def camera_authorization(camera: str, token: str) -> str:
@@ -84,6 +86,14 @@ def add_camera_intake(app: FastAPI, store: Store, can_post: Callable[[str, str],
         except (sqlite3.Error, OSError) as exc:
             LOG.error("Could not store Axis event from %s (%s)", camera, type(exc).__name__)
             raise HTTPException(503, "Event could not be stored") from exc
+
+
+def make_camera_receiver(data_dir: Path, allowed_host: str) -> FastAPI:
+    store = Store(data_dir)
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
+    add_camera_intake(app, store, lambda camera, header: camera_can_post(store, camera, header))
+    return app
 
 
 def make_app(data_dir: Path, token: str) -> FastAPI:

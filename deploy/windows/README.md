@@ -30,7 +30,7 @@ Use `-SkipFirewall` if IT manages the allow rule centrally. Use `-VerifyOnly` to
 
 Keep RDP access under the existing IT policy. The preview needs no outbound Internet access or camera network rule.
 
-To change the shared port for staff and Axis cameras, allow the new TCP port in the firewall first, then open **Admin → Service** and choose **Save port and restart**. Open the new address and update the destination on each camera. The setup firewall rule covers TCP `8765`. PlateLog uses that startup port as a fallback if the saved port is occupied when the service starts.
+To change the staff web port, allow the new TCP port in the firewall first, then open **Admin → Service** and choose **Save port and restart**. The setup firewall rule covers TCP `8765`. PlateLog uses that startup port as a fallback if the saved web port is occupied when the service starts.
 
 ## Backup and removal
 
@@ -45,7 +45,7 @@ Get-NetFirewallRule -Name 'PlateLog-Preview-TCP-8765' -ErrorAction SilentlyConti
 
 ## Before a workplace camera pilot
 
-Use **Admin → Axis cameras** to register cameras and choose HTTP Basic or no credentials per camera. The browser and camera POST endpoint share the same port. Restrict network access to authorised operators and camera sources before accepting real captures. Verify the actual Axis firmware with a controlled vehicle pass, then test service restart and a restore on the target Windows Server. [Axis push event setup](https://help.axis.com/en-us/axis-license-plate-verifier#push-event-information-to-third-party-software)
+Use **Admin → Axis cameras** to register cameras, set their HTTP POST credentials, and change the dedicated camera port from its default of `8766`. Add a separate firewall rule for the chosen TCP port scoped to the camera sources. Point each camera to its POST path on that port. Restrict access to the staff web port to authorised operators. Verify the actual Axis firmware with a controlled vehicle pass, then test service restart and a restore on the target Windows Server. [Axis push event setup](https://help.axis.com/en-us/axis-license-plate-verifier#push-event-information-to-third-party-software)
 
 ## Building the offline bundle
 

@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .credentials import password_matches, password_verifier
-from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN, add_camera_intake, camera_can_post
+from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .store import Store
 
 CSS = """
@@ -351,7 +351,8 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
 
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
-                 change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo) -> None:
+                 change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo,
+                 camera_port: int | None, camera_online: bool, change_camera_port: Callable[[int], None] | None) -> None:
     sessions: dict[str, tuple[float, str, str]] = {}
     login_attempts: list[float] = []
     password_check = asyncio.Lock()
@@ -390,19 +391,30 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"]) for row in store.cameras())
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
-            <label>Shared web and camera port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
+            <label>Staff web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
             <p>Allow the new TCP port in your firewall before applying it.</p>
             <button type="submit">Save port and restart</button></form>''' if restart and change_web_port else ""
         restart_form = f'''<section><h3>Service</h3><form method="post" action="/admin/restart">
             <input type="hidden" name="csrf" value="{csrf}">
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required> Confirm restart</label>
             <button type="submit">Restart PlateLog</button></form>{port_form}</section>''' if restart else ""
+        camera_port_form = f'''<form method="post" action="/admin/camera-port">
+            <input type="hidden" name="csrf" value="{csrf}">
+            <label>Camera POST port <input type="number" name="port" min="1" max="65535" value="{camera_port or ''}" required></label>
+            <p>Allow this TCP port for the cameras in your firewall before applying a change.</p>
+            <button type="submit">Save camera port and restart</button></form>''' if restart and change_camera_port else ""
+        camera_port_status = (f"Camera POST listener port {camera_port}." if camera_online else
+                              f"Camera POST listener is offline on port {camera_port}.")
+        camera_help = "Use the camera port and the POST path shown for each camera."
+        if not change_camera_port:
+            camera_help += " In Docker, use the published camera port on the host."
         return show(f'''<p class="notice" role="status">{escape(message)}</p>{restart_form}
             <section><h3>Display</h3><form method="post" action="/admin/timezone">
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(store.setting('display_timezone') or str(display_zone))}" required></label>
             <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
-            <section><h3>Axis cameras</h3><p>Use the same host and port as this register with the path shown for each camera.
+            <section><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
+            <p>
             Camera IDs use lowercase letters, digits, dashes and underscores.
             For HTTP Basic, set a username and a password of at least 14 characters. Leave the password blank to keep it for the same username.</p>
             {cameras}{camera_form(csrf)}</section>
@@ -601,22 +613,24 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             raise
         return restart_response()
 
-    @app.post("/admin/web-port")
-    async def save_web_port(request: Request):
+    async def save_port(request: Request, name: str, current_port: int | None, other_port: int | None,
+                        change_port: Callable[[int], None] | None, move_admin: bool):
         nonlocal restarting
         csrf, fields = await authorized_form(request)
-        if not change_web_port or not restart or restarting:
-            raise HTTPException(409, "The web port cannot be changed right now.")
+        if not change_port or not restart or restarting:
+            raise HTTPException(409, f"The {name} port cannot be changed right now.")
         port_text = fields.get("port", "")
         if not re.fullmatch(r"[0-9]{1,5}", port_text) or not 1 <= int(port_text) <= 65535:
-            return dashboard(csrf, "Enter a web port from 1 to 65535.", 400)
+            return dashboard(csrf, "Enter a TCP port from 1 to 65535.", 400)
         port = int(port_text)
-        if port == web_port:
+        if port == current_port:
             return dashboard(csrf, "PlateLog is already using this port.")
-        destination = str(request.url.replace(port=port, path="/admin", query=""))
+        if port == other_port:
+            return dashboard(csrf, "The staff web and camera POST ports must be different.", 409)
+        destination = str(request.url.replace(port=port, path="/admin", query="")) if move_admin else "/admin"
         restarting = True
         try:
-            await run_in_threadpool(change_web_port, port)
+            await run_in_threadpool(change_port, port)
         except OSError:
             restarting = False
             return dashboard(csrf, "PlateLog could not open that port. Choose another port.", 409)
@@ -625,11 +639,21 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             raise
         return restart_response(destination)
 
+    @app.post("/admin/web-port")
+    async def save_web_port(request: Request):
+        return await save_port(request, "staff web", web_port, camera_port, change_web_port, move_admin=True)
+
+    @app.post("/admin/camera-port")
+    async def save_camera_port(request: Request):
+        return await save_port(request, "camera POST", camera_port if camera_online else None, web_port,
+                               change_camera_port, move_admin=False)
+
 
 def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | ZoneInfo = timezone.utc,
                  *, persistent: bool = False, allow_http_admin: bool = True,
                  restart: Callable[[], None] | None = None, web_port: int | None = None,
-                 change_web_port: Callable[[int], None] | None = None) -> FastAPI:
+                 change_web_port: Callable[[int], None] | None = None, camera_port: int | None = None,
+                 camera_online: bool = False, change_camera_port: Callable[[int], None] | None = None) -> FastAPI:
     if allowed_host != "*" and not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", allowed_host):
         raise ValueError("Expected a hostname, IPv4 address, or '*' for --allowed-host")
     store = Store(data_dir)
@@ -655,9 +679,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
-    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone)
-    if persistent:
-        add_camera_intake(app, store, lambda camera, header: camera_can_post(store, camera, header))
+    admin_routes(app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone,
+                 camera_port, camera_online, change_camera_port)
 
     @app.middleware("http")
     async def preview_headers(request: Request, call_next):
