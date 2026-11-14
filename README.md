@@ -2,6 +2,12 @@
 
 PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings. A persistent instance can receive Axis HTTP POST events into the same register. The [v1 specification](technical-spec.md) describes the wider pilot.
 
+![PlateLog register showing two synthetic vehicle passages with photos](docs/images/register.png)
+
+Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
+
+![PlateLog register filtered to the corrected plate](docs/images/register-search.png)
+
 ## Quick start
 
 With Python 3.12 or 3.13 installed, run the following from the repository root, then open `http://127.0.0.1:8765/`:
