@@ -3,6 +3,7 @@
 import csv
 import json
 import os
+import stat
 import tempfile
 from contextlib import closing
 from datetime import datetime, time, timedelta, timezone
@@ -17,6 +18,7 @@ DEFAULT_SCHEDULE = {"enabled": False, "run_time": "00:05", "folder": ""}
 HEADERS = ("Plate", "Capture time", "Camera", "Direction", "Make", "Model", "Colour",
            "Event count", "Photo count", "Passage ID")
 _export_lock = Lock()
+_folder_check_lock = Lock()
 
 
 def report_schedule(store: Store) -> dict:
@@ -25,12 +27,57 @@ def report_schedule(store: Store) -> dict:
 
 
 def report_folder(value: str) -> Path:
-    if any(ord(character) < 32 for character in value) or value.startswith(("\\\\.\\", "\\\\?\\")):
+    if len(value) > 1024:
+        raise ValueError("Use a destination folder of at most 1024 characters.")
+    if any(ord(character) < 32 for character in value) or value.replace("/", "\\").startswith(("\\\\.\\", "\\\\?\\")):
         raise ValueError("Enter an absolute report folder on the server, or a UNC share on Windows.")
     folder = Path(value)
     if not folder.is_absolute():
         raise ValueError("Enter an absolute report folder on the server, or a UNC share on Windows.")
     return folder
+
+
+def check_report_folder(value: str) -> None:
+    """Test the destination with the service's own file permissions."""
+    folder = report_folder(value)
+    if not _folder_check_lock.acquire(blocking=False):
+        raise ValueError("A destination folder test is already running. Try again shortly.")
+    try:
+        _check_folder_access(folder)
+    finally:
+        _folder_check_lock.release()
+
+
+def _check_folder_access(folder: Path) -> None:
+    try:
+        if not stat.S_ISDIR(folder.stat().st_mode):
+            raise ValueError("The destination is a file. Choose an existing folder.")
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise ValueError("The destination folder does not exist on the PlateLog server.") from error
+    except OSError as error:
+        raise ValueError(f"PlateLog could not access the destination folder. {error.strerror or error}.") from error
+
+    probe = None
+    sample = b"PlateLog destination folder check\n"
+    action = "create or write a test file"
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix=".platelog-check-", suffix=".tmp", delete=False) as output:
+            probe = Path(output.name)
+            output.write(sample)
+            output.flush()
+            os.fsync(output.fileno())
+        action = "read the test file back"
+        with probe.open("rb") as input_file:
+            if input_file.read(len(sample) + 1) != sample:
+                raise ValueError("The test file contents did not match what PlateLog wrote.")
+    except OSError as error:
+        raise ValueError(f"PlateLog could not {action} in the destination folder. {error.strerror or error}.") from error
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink(missing_ok=True)
+            except OSError as error:
+                raise ValueError(f"PlateLog could not remove its test file {probe.name}. {error.strerror or error}.") from error
 
 
 def csv_text(value: str | None) -> str:

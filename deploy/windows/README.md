@@ -36,6 +36,8 @@ To change the staff web port, allow the new TCP port in the firewall first, then
 
 ## Daily CSV reports
 
+Use **Test folder** to check access under the PlateLog service account. The check writes, reads back, and removes a temporary file in the entered folder. Select **Save CSV schedule** to apply the destination.
+
 In **Admin → Daily CSV report**, set the time and destination folder. For a remote destination, use a UNC path such as `\\fileserver\reports\PlateLog`. The bundled service runs as `LocalService`, which connects to network shares anonymously. For a protected share, IT can run PlateLog under an account with write access to the share and access to PlateLog's local data and logs. [Microsoft guidance on LocalService](https://learn.microsoft.com/en-us/windows/win32/services/localservice-account) · [Microsoft guidance on mapped drives and services](https://learn.microsoft.com/en-us/windows/win32/services/services-and-redirected-drives)
 
 ## Backup and removal

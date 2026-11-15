@@ -36,7 +36,7 @@ from .credentials import (
     password_matches,
     password_verifier,
 )
-from .daily_csv import export_due_report, report_folder, report_schedule
+from .daily_csv import check_report_folder, export_due_report, report_folder, report_schedule
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .store import Store
 
@@ -87,6 +87,7 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .camera-form .camera-actions { display: flex; align-items: center; gap: 12px; grid-column: 1 / -1; }
 #csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
 #csv-reports code { overflow-wrap: anywhere; }
+#csv-reports .folder-result { padding-inline-start: 8px; border-inline-start: 3px solid #194b79; overflow-wrap: anywhere; }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 form label { display: grid; gap: 4px; font-weight: 600; } input, select, button { font: inherit; padding: 6px 8px; }
@@ -578,8 +579,9 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
         <a href="/admin#axis-cameras">Cancel</a></div></form></div>'''
 
 
-def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
-    schedule = report_schedule(store)
+def csv_schedule_form(store: Store, csrf: str, zone: str, *, draft: dict | None = None,
+                      folder_result: str = "") -> str:
+    schedule = draft if draft is not None else report_schedule(store)
     stored_status = store.setting("daily_csv_status")
     last = json.loads(stored_status) if stored_status else None
     result = "<p>No export has run yet.</p>"
@@ -587,15 +589,17 @@ def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
         label = "Last export failed" if last["result"] == "error" else "Last successful export"
         result = (f'<p>{label} on {escape(last["attempted_at"])}. {escape(last["message"])}</p>'
                   f'<p><code>{escape(last["file"])}</code></p>')
+    folder_notice = f'<p class="folder-result" role="status">{escape(folder_result)}</p>' if folder_result else ""
     return f'''<section id="csv-reports"><h3>Daily CSV report</h3>
         <p>Exports the previous calendar day in {escape(zone)}, with a header row and one row per passage.</p>
         <form method="post" action="/admin/csv-schedule"><input type="hidden" name="csrf" value="{csrf}">
         <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule['enabled'] else ''}> Enable daily CSV export</label>
         <label>Run time <input type="time" name="run_time" value="{escape(schedule['run_time'])}" required></label>
         <label class="destination">Destination folder <input name="folder" value="{escape(schedule['folder'])}" maxlength="1024" spellcheck="false"></label>
+        <button type="submit" name="test_folder" value="yes" formaction="/admin/csv-schedule#csv-reports" formnovalidate>Test folder</button>
         <p>Use a folder on the server or a Windows UNC share that the PlateLog service account can write to.
         PlateLog names each file <code>platelog-YYYY-MM-DD.csv</code>.</p>
-        <button type="submit">Save CSV schedule</button></form>{result}</section>'''
+        <button type="submit">Save CSV schedule</button></form>{folder_notice}{result}</section>'''
 
 
 def register_destination(value: str) -> str:
@@ -757,7 +761,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return show(f'<p role="status">{escape(message)}</p>{password_form(csrf)}', status)
 
     def dashboard(csrf: str, message: str = "", status: int = 200, *, camera_selection: str | None = None,
-                  camera_error: CameraFormError | None = None, camera_saved: str = "") -> HTMLResponse:
+                  camera_error: CameraFormError | None = None, camera_saved: str = "",
+                  csv_draft: dict | None = None, folder_result: str = "") -> HTMLResponse:
         retention = store.retention()
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
@@ -821,7 +826,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
             Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
             <button type="submit">Purge now</button></form></section>
-            {csv_schedule_form(store, csrf, zone)}{password_form(csrf)}
+            {csv_schedule_form(store, csrf, zone, draft=csv_draft, folder_result=folder_result)}{password_form(csrf)}
             <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
             <dt>Events</dt><dd>{counts['packets']:,}</dd>
             <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
@@ -910,10 +915,16 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         run_time = fields.get("run_time", "")
         folder = fields.get("folder", "").strip()
         enabled = fields.get("enabled") == "yes"
+        if fields.get("test_folder") == "yes":
+            draft = {"enabled": enabled, "run_time": run_time, "folder": folder}
+            try:
+                await run_in_threadpool(check_report_folder, folder)
+            except ValueError as error:
+                return dashboard(csrf, status=400, csv_draft=draft, folder_result=str(error))
+            return dashboard(csrf, csv_draft=draft,
+                             folder_result=f"Folder test passed for {folder}. PlateLog wrote, read, and removed a test file.")
         if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", run_time):
             return dashboard(csrf, "Enter a run time between 00:00 and 23:59.", 400)
-        if len(folder) > 1024:
-            return dashboard(csrf, "Use a destination folder of at most 1024 characters.", 400)
         if enabled or folder:
             try:
                 folder = str(report_folder(folder))
