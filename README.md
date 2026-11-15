@@ -8,6 +8,10 @@ Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
 
 ![PlateLog register filtered to the corrected plate](docs/images/register-search.png)
 
+One of the simulated camera captures features `L19MXB`, a nod to PlateLog’s creator.
+
+![Simulated camera capture of a burgundy minivan with the L19MXB number plate](docs/images/demo-l19mxb.jpg)
+
 ## Quick start
 
 With Python 3.12 or 3.13 installed, run the following from the repository root, then open `http://127.0.0.1:8765/`:
