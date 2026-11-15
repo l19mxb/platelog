@@ -16,6 +16,7 @@ from html import escape
 from io import BytesIO
 from pathlib import Path
 from sqlite3 import Row
+from threading import Lock
 from typing import Annotated, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 from xml.sax.saxutils import escape as xml_escape
@@ -244,6 +245,7 @@ CAMERA_NAMES = {"demo-entry": "Demo entry", "demo-exit": "Demo exit"}
 CAMERA_AUTH_LABELS = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
 VEHICLE_COLUMNS = ("make", "model", "colour")
 REPORT_LIMIT = 10_000
+PHOTO_LIMIT = 5_000
 REGISTER_PAGE_SIZE = 50
 REGISTER_PAGE_LINKS = 10
 SESSION_SECONDS = 8 * 60 * 60
@@ -251,6 +253,7 @@ ADMIN_COOKIE = "platelog_admin"
 STAFF_COOKIE = "platelog_staff"
 LOG = logging.getLogger(__name__)
 PHOTO_BUDGET = 32 * 1024 * 1024
+_excel_export_lock = Lock()
 OOXML = "http://schemas.openxmlformats.org/"
 RELATIONSHIPS = OOXML + "package/2006/relationships"
 OFFICE_REL = OOXML + "officeDocument/2006/relationships"
@@ -338,13 +341,16 @@ class ReportTooLarge(ValueError):
 
 
 def excel_report(rows: list[dict], filters: RegisterFilters, zone: timezone | ZoneInfo,
-                 photo_path: Callable[[str], Path | None]) -> bytes:
+                 photo_path: Callable[[str], Path | None], *, include_photos: bool = True) -> bytes:
+    if include_photos and sum(bool(row["photo_id"]) for row in rows) > PHOTO_LIMIT:
+        raise ReportTooLarge(f"The selection has photos for more than {PHOTO_LIMIT:,} passages.")
     counts = Counter(row["camera"] for row in rows)
     summary = [("Filter", "Value"), ("From (inclusive)", filters.start or "Any time"),
                ("To (inclusive minute)", filters.end or "Any time"), ("Time zone", str(zone)),
                ("Registration", filters.plate or "All registrations"),
                ("Camera", CAMERA_NAMES.get(filters.camera, filters.camera) or "All cameras"),
-               ("Passages", len(rows)), (), ("Camera", "Passages"),
+               ("Passages", len(rows)), ("Embedded photos", "Included" if include_photos else "Omitted"),
+               (), ("Camera", "Passages"),
                *((CAMERA_NAMES.get(camera, camera), count) for camera, count in sorted(counts.items()))]
     passages = [("Image", "Reg", "Date", "Time", "UTC offset", "Camera", "Direction", "Make", "Model", "Colour", "Photos")]
     output = BytesIO()
@@ -356,7 +362,9 @@ def excel_report(rows: list[dict], filters: RegisterFilters, zone: timezone | Zo
         for number, row in enumerate(rows, 2):
             capture = datetime.fromtimestamp(row["capture_ms"] / 1000, zone)
             image_label = "Image expired" if row.get("photo_expired") else "No image"
-            if row["photo_id"]:
+            if not include_photos:
+                image_label = ""
+            elif row["photo_id"]:
                 path = photo_path(row["photo_id"])
                 try:
                     photo = export_thumbnail(path) if path else None
@@ -367,7 +375,7 @@ def excel_report(rows: list[dict], filters: RegisterFilters, zone: timezone | Zo
                     data, width, height = photo
                     image_bytes += len(data)
                     if image_bytes > PHOTO_BUDGET:
-                        raise ReportTooLarge
+                        raise ReportTooLarge(f"The combined thumbnails exceed {PHOTO_BUDGET // (1024 * 1024)} MiB.")
                     archive.writestr(f"xl/media/vehicle-{number}.jpg", data)
                     anchors.append(drawing_anchor(number, width, height))
                     image_links.append(f'<Relationship Id="rId{number}" Type="{OFFICE_REL}/image" Target="../media/vehicle-{number}.jpg"/>')
@@ -1086,9 +1094,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             raise HTTPException(400, "To must be the same minute as From or later.")
         return RegisterFilters(plate.strip(), camera, start, end, lower, upper, zone)
 
-    def matching(filters: RegisterFilters, limit: int):
-        return store.passages(filters.plate, filters.camera, limit, partial_plate=True,
-                              start_ms=filters.start_ms, end_ms=filters.end_ms)
+    def filter_params(filters: RegisterFilters) -> dict[str, str]:
+        return {key: value for key in ("plate", "camera", "start", "end") if (value := getattr(filters, key))}
 
     @app.get("/", response_class=HTMLResponse, dependencies=signed_in)
     def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)], page: int = Query(1, ge=1)):
@@ -1101,6 +1108,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             <label>From <input type="datetime-local" name="start" value="{escape(filters.start)}"></label>
             <label>To <input type="datetime-local" name="end" value="{escape(filters.end)}"></label>
             <button type="submit">Search</button><button type="submit" formaction="/register/export" data-export>Export Excel</button>
+            <button type="submit" formaction="/register/export" data-export name="photos" value="false">Excel without photos</button>
             <a href="/" data-clear-search>Clear</a></form>'''
         toggles = "".join(f'<label><input type="checkbox" id="show-{key}" data-column-toggle="{key}" checked> {key.title()}</label>'
                           for key in VEHICLE_COLUMNS)
@@ -1121,7 +1129,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         return f'<nav class="register-pages" data-pager="{position}" aria-label="Passage pages ({position})">{"".join(links)}</nav>'
 
     def page_link(filters: RegisterFilters, page: int, text: str, *, label: str = "", current: bool = False) -> str:
-        params = {key: getattr(filters, key) for key in ("plate", "camera", "start", "end") if getattr(filters, key)}
+        params = filter_params(filters)
         if page > 1:
             params["page"] = str(page)
         href = "/?" + escape(urlencode(params)) if params else "/"
@@ -1168,14 +1176,31 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         return render_results(filters, page)
 
     @app.get("/register/export", dependencies=signed_in)
-    def export_register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
-        rows = matching(filters, REPORT_LIMIT + 1)
-        if len(rows) > REPORT_LIMIT:
-            return HTMLResponse(register_page(request, "Export", '<p>More than 10,000 passages match. Narrow the date range and try again.</p><p><a href="/">Back to register</a></p>'), status_code=400)
+    def export_register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)],
+                        photos: bool = Query(True)):
+        def reject(message: str, *, photo_fallback: bool = False, busy: bool = False) -> HTMLResponse:
+            params = filter_params(filters)
+            back = "/?" + escape(urlencode(params)) if params else "/"
+            links = f'<a href="{back}">Back to filtered register</a>'
+            if photo_fallback:
+                no_photos = escape(urlencode({**params, "photos": "false"}))
+                links = f'<a href="/register/export?{no_photos}">Export without photos</a> · ' + links
+            content = f'<section><h2>Excel export</h2><p>{escape(message)}</p><p>{links}</p></section>'
+            return HTMLResponse(register_page(request, "Export", content), status_code=429 if busy else 400,
+                                headers={"Retry-After": "5"} if busy else None)
+
+        if not _excel_export_lock.acquire(blocking=False):
+            return reject("Another Excel export is being prepared. Wait a moment and try again.", busy=True)
         try:
-            report = excel_report(rows, filters, filters.zone, store.image_path)
-        except ReportTooLarge:
-            return HTMLResponse(register_page(request, "Export", '<p>The photos make this report too large. Narrow the date range and try again.</p><p><a href="/">Back to register</a></p>'), status_code=400)
+            rows = store.export_passages(filters.plate, filters.camera, REPORT_LIMIT,
+                                         start_ms=filters.start_ms, end_ms=filters.end_ms)
+            if rows is None:
+                return reject(f"More than {REPORT_LIMIT:,} passages match. Narrow From and To and try again.")
+            report = excel_report(rows, filters, filters.zone, store.image_path, include_photos=photos)
+        except ReportTooLarge as error:
+            return reject(f"{error} Export without photos or narrow From and To.", photo_fallback=True)
+        finally:
+            _excel_export_lock.release()
         return Response(report,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         headers={"Content-Disposition": 'attachment; filename="platelog-report.xlsx"'})

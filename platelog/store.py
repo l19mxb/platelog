@@ -385,10 +385,25 @@ class Store:
             page = min(page, last)
             return self._matching_passages(db, args, size, (page - 1) * size), total, page
 
+    def export_passages(self, plate: str, camera: str, limit: int, *,
+                        start_ms: int | None = None, end_ms: int | None = None) -> list[dict] | None:
+        """Return a complete report snapshot, or None if it would exceed the limit."""
+        args = passage_match_args(plate, camera, True, start_ms, end_ms)
+        if args is None:
+            return []
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            rows = self._passage_rows(db, args, limit + 1)
+            if len(rows) > limit:
+                return None
+            return [self._summary(db, row) for row in rows]
+
     def _matching_passages(self, db: sqlite3.Connection, args: tuple, limit: int, offset: int = 0) -> list[dict]:
-        rows = db.execute(f"SELECT p.* {PASSAGE_MATCH} ORDER BY p.first_ms DESC, p.id DESC LIMIT ? OFFSET ?",
+        return [self._summary(db, row) for row in self._passage_rows(db, args, limit, offset)]
+
+    def _passage_rows(self, db: sqlite3.Connection, args: tuple, limit: int, offset: int = 0) -> list[sqlite3.Row]:
+        return db.execute(f"SELECT p.* {PASSAGE_MATCH} ORDER BY p.first_ms DESC, p.id DESC LIMIT ? OFFSET ?",
                           (*args, limit, offset)).fetchall()
-        return [self._summary(db, row) for row in rows]
 
     def report_passages(self, start_ms: int, end_ms: int):
         with closing(self.connect()) as db:
