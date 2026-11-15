@@ -46,6 +46,11 @@ body { margin: 0; }
 main { padding: 24px clamp(12px, 2vw, 32px) 40px; }
 h1, h2, p { margin: 0; } h1 { font-size: 2.2rem; letter-spacing: -.045em; }
 header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
+.header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px 24px; }
+.register-clock { display: grid; gap: 2px; margin: 0; font-size: .875rem; }
+.register-clock div { display: grid; grid-template-columns: 8.5em auto; gap: 8px; }
+.register-clock dt { color: #4b5d70; }
+.register-clock dd { margin: 0; font-variant-numeric: tabular-nums; }
 .tabs { display: flex; gap: 18px; margin: 14px 0 0; border-bottom: 1px solid #d3dce5; }
 .tabs a { padding: 6px 2px; text-decoration: none; }
 .tabs a[aria-current] { border-bottom: 2px solid #194b79; font-weight: 650; }
@@ -120,6 +125,60 @@ for (const checkbox of document.querySelectorAll('[data-column-toggle]')) {
     checkbox.addEventListener('change', () => {
         try { localStorage.setItem(key, checkbox.checked ? 'shown' : 'hidden'); } catch {}
     });
+}
+
+const clock = document.querySelector('#register-clock');
+if (clock) {
+    const systemTime = clock.querySelector('[data-system-time]');
+    const lastRead = clock.querySelector('[data-last-read]');
+    const noReads = clock.querySelector('[data-no-reads]');
+    let serverMs = Number(clock.dataset.serverMs);
+    let syncedAt = performance.now();
+    let zone = clock.dataset.zone;
+    const dateOptions = { day: '2-digit', month: '2-digit', year: 'numeric',
+                          hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' };
+    let format = new Intl.DateTimeFormat('en-AU', { ...dateOptions, timeZone: zone });
+    let syncing = false;
+
+    function showTime(element, value) {
+        const date = new Date(value);
+        element.dateTime = date.toISOString();
+        element.textContent = format.format(date);
+    }
+
+    function tick() {
+        showTime(systemTime, serverMs + performance.now() - syncedAt);
+    }
+
+    async function syncClock() {
+        if (syncing || document.hidden) return;
+        syncing = true;
+        try {
+            const response = await fetch('/register/status');
+            if (!response.ok) return;
+            const status = await response.json();
+            serverMs = status.server_ms;
+            syncedAt = performance.now();
+            if (zone !== status.zone) {
+                zone = status.zone;
+                format = new Intl.DateTimeFormat('en-AU', { ...dateOptions, timeZone: zone });
+                clock.title = zone;
+            }
+            lastRead.hidden = status.last_read_ms === null;
+            noReads.hidden = !lastRead.hidden;
+            if (!lastRead.hidden) {
+                showTime(lastRead, status.last_read_ms);
+            }
+            tick();
+        } catch {} finally {
+            syncing = false;
+        }
+    }
+
+    tick();
+    window.setInterval(tick, 1000);
+    window.setInterval(syncClock, 5000);
+    document.addEventListener('visibilitychange', syncClock);
 }
 
 const form = document.querySelector('#register-search');
@@ -412,7 +471,7 @@ def timestamp(value: int) -> str:
     return datetime.fromtimestamp(value / 1000, timezone.utc).isoformat(sep=" ", timespec="milliseconds")
 
 
-def page(title: str, content: str, *, show_admin: bool = True) -> str:
+def page(title: str, content: str, *, show_admin: bool = True, header_extra: str = "") -> str:
     tab = "admin" if title == "Admin" else "register"
     register_current = ' aria-current="page"' if tab == "register" else ""
     admin_current = ' aria-current="page"' if tab == "admin" else ""
@@ -420,13 +479,14 @@ def page(title: str, content: str, *, show_admin: bool = True) -> str:
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{escape(title)} | PlateLog</title><link rel="stylesheet" href="/preview.css"><script defer src="/preview.js"></script></head>
-    <body><main><header><h1>PlateLog</h1><p>Vehicle passage register</p>
+    <body><main><header><div class="header-top"><div><h1>PlateLog</h1><p>Vehicle passage register</p></div>{header_extra}</div>
     <nav class="tabs" aria-label="PlateLog"><a href="/"{register_current}>Register</a>
     {admin_link}</nav></header>{content}</main></body></html>"""
 
 
-def register_page(request: Request, title: str, content: str) -> str:
-    return page(title, content, show_admin=not getattr(request.state, "staff_register_csrf", None))
+def register_page(request: Request, title: str, content: str, *, header_extra: str = "") -> str:
+    return page(title, content, show_admin=not getattr(request.state, "staff_register_csrf", None),
+                header_extra=header_extra)
 
 
 def set_admin_password(store: Store, password: str) -> None:
@@ -1084,10 +1144,13 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
     def browser_script():
         return Response(JS, media_type="text/javascript")
 
+    def register_zone() -> timezone | ZoneInfo:
+        saved_zone = store.setting("display_timezone") if persistent else None
+        return ZoneInfo(saved_zone) if saved_zone else display_zone
+
     def filters_for_request(plate: str = Query("", max_length=128), camera: str = Query("", max_length=128),
                             start: str = Query("", max_length=16), end: str = Query("", max_length=16)) -> RegisterFilters:
-        saved_zone = store.setting("display_timezone") if persistent else None
-        zone = ZoneInfo(saved_zone) if saved_zone else display_zone
+        zone = register_zone()
         lower = time_bound(start, zone)
         upper = time_bound(end, zone, end=True)
         if lower is not None and upper is not None and (start > end or lower >= upper):
@@ -1096,6 +1159,27 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     def filter_params(filters: RegisterFilters) -> dict[str, str]:
         return {key: value for key in ("plate", "camera", "start", "end") if (value := getattr(filters, key))}
+
+    def clock_header(zone: timezone | ZoneInfo) -> str:
+        last_read = store.last_received_ms()
+        server_ms = time.time_ns() // 1_000_000
+
+        def clock_time(key: str, value: int) -> str:
+            local = datetime.fromtimestamp(value / 1000, zone)
+            return f'<time data-{key} datetime="{local.isoformat()}">{local.strftime("%d/%m/%Y, %H:%M:%S")}</time>'
+
+        last_time = clock_time("last-read", last_read) if last_read is not None else '<time data-last-read hidden></time>'
+        hide_empty = " hidden" if last_read is not None else ""
+        zone_label = escape(str(zone))
+        return f'''<dl id="register-clock" class="register-clock" title="{zone_label}"
+            data-zone="{zone_label}" data-server-ms="{server_ms}">
+            <div><dt>System time</dt><dd>{clock_time("system-time", server_ms)}</dd></div>
+            <div><dt>Last read received</dt><dd>{last_time}<span data-no-reads{hide_empty}>No reads yet</span></dd></div></dl>'''
+
+    @app.get("/register/status", dependencies=signed_in)
+    def register_status():
+        last_read = store.last_received_ms()
+        return {"server_ms": time.time_ns() // 1_000_000, "last_read_ms": last_read, "zone": str(register_zone())}
 
     @app.get("/", response_class=HTMLResponse, dependencies=signed_in)
     def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)], page: int = Query(1, ge=1)):
@@ -1114,7 +1198,9 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                           for key in VEHICLE_COLUMNS)
         toolbar = f'<div class="toolbar">{controls}<fieldset><legend>Columns</legend>{toggles}</fieldset></div>'
         return register_page(request, "Register", register_sign_out_form(request) + toolbar +
-                             '<p id="search-status" role="status"></p>' + f'<div id="register-results">{render_results(filters, page)}</div>')
+                             '<p id="search-status" role="status"></p>' +
+                             f'<div id="register-results">{render_results(filters, page)}</div>',
+                             header_extra=clock_header(filters.zone))
 
     def pagination(filters: RegisterFilters, page: int, last: int, position: str) -> str:
         if last < 2:

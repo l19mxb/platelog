@@ -12,8 +12,15 @@ from uuid import uuid4
 from .axis import Event, plate_key
 
 TRACK_WINDOW_MS = 60_000
+DEFAULT_RETENTION = {"enabled": True, "passage_days": 360, "photo_days": 90}
+LEGACY_RETENTION = {**DEFAULT_RETENTION, "enabled": False}
 
-SCHEMA = """
+SCHEMA = f"""
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT OR IGNORE INTO settings (name, value)
+    SELECT 'retention', '{json.dumps(DEFAULT_RETENTION)}'
+    WHERE NOT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='passages');
 CREATE TABLE IF NOT EXISTS passages (
     id TEXT PRIMARY KEY,
     camera TEXT NOT NULL,
@@ -54,7 +61,6 @@ CREATE TABLE IF NOT EXISTS images (
     byte_count INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS image_packet ON images(packet_id, position);
-CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS camera_settings (
     id TEXT PRIMARY KEY,
     mode TEXT NOT NULL CHECK (mode IN ('disabled', 'none', 'basic')),
@@ -67,6 +73,7 @@ CREATE TABLE IF NOT EXISTS admin_audit (
     activity TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCES passages(id));
+COMMIT;
 """
 
 PACKET_ORDER = "capture_ms DESC, counter DESC, received_ms DESC, rowid DESC"
@@ -82,7 +89,6 @@ def passage_match_args(plate: str, camera: str, partial_plate: bool, start_ms: i
         return None
     return (start_ms if start_ms is not None else 0, end_ms - 1 if end_ms is not None else 253402300799999,
             camera, camera, key, key, partial_plate, key)
-DEFAULT_RETENTION = {"enabled": False, "passage_days": 360, "photo_days": 90}
 DEFAULT_REGISTER_ACCESS = {"required": False, "verifier": "", "revision": ""}
 
 
@@ -178,7 +184,12 @@ class Store:
 
     def retention(self) -> dict:
         saved = self.setting("retention")
-        return json.loads(saved) if saved else DEFAULT_RETENTION.copy()
+        return json.loads(saved) if saved else LEGACY_RETENTION.copy()
+
+    def last_received_ms(self) -> int | None:
+        with closing(self.connect()) as db:
+            row = db.execute("SELECT received_ms FROM packets ORDER BY rowid DESC LIMIT 1").fetchone()
+            return row[0] if row else None
 
     def cameras(self) -> list[sqlite3.Row]:
         with closing(self.connect()) as db:
@@ -220,7 +231,7 @@ class Store:
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             saved = db.execute("SELECT value FROM settings WHERE name='retention'").fetchone()
-            config = json.loads(saved[0]) if saved else DEFAULT_RETENTION
+            config = json.loads(saved[0]) if saved else LEGACY_RETENTION
             manual = confirmed_limits is not None
             if manual and confirmed_limits != (config["passage_days"], config["photo_days"]):
                 raise ValueError("Retention limits changed. Review the saved limits before purging.")
