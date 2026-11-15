@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCE
 """
 
 PACKET_ORDER = "capture_ms DESC, counter DESC, received_ms DESC, rowid DESC"
-DEFAULT_RETENTION = {"enabled": False, "passage_days": 30, "photo_days": 7}
+DEFAULT_RETENTION = {"enabled": False, "passage_days": 360, "photo_days": 90}
 DEFAULT_REGISTER_ACCESS = {"required": False, "verifier": "", "revision": ""}
 
 

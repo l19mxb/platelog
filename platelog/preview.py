@@ -48,6 +48,17 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .admin dl { display: grid; grid-template-columns: max-content auto; gap: 4px 18px; }
 .admin dd { margin: 0; } .admin ul { padding-inline-start: 1.4rem; }
 .admin .notice { border-inline-start: 4px solid #194b79; padding-inline-start: 10px; }
+.camera-card { padding: 12px 14px; margin-top: 10px; background: #fff; border: 1px solid #d3dce5; border-radius: 6px; }
+.camera-card summary { cursor: pointer; overflow-wrap: anywhere; }
+.camera-card summary:focus-visible { outline: 3px solid #ac5d00; }
+.camera-status { margin-inline-start: 8px; font-size: .875rem; }
+.camera-card h4 { margin: 0; }
+.camera-card code { overflow-wrap: anywhere; }
+.admin .camera-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); }
+.camera-form input, .camera-form select { box-sizing: border-box; width: 100%; min-width: 0; }
+.camera-form .camera-auth-fields { display: contents; }
+.camera-form:has(select option:checked:not([value="basic"])) .camera-auth-fields { display: none; }
+.camera-form .camera-actions { grid-column: 1 / -1; }
 #csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
 #csv-reports code { overflow-wrap: anywhere; }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
@@ -350,16 +361,24 @@ async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
 
 
 def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username: str = "") -> str:
+    modes = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
     options = "".join(f'<option value="{value}"{" selected" if value == mode else ""}>{label}</option>'
-                      for value, label in (("disabled", "Disabled"), ("basic", "HTTP Basic"), ("none", "No credentials")))
-    identity = (f'<input type="hidden" name="camera_id" value="{camera_id}">'
-                f'<p>{camera_id} · <code>/api/axis/{camera_id}/events</code></p>' if camera_id else
-                '<label>New camera ID <input name="camera_id" maxlength="64" required></label>')
-    return f'''<form method="post" action="/admin/cameras"><input type="hidden" name="csrf" value="{csrf}">
+                      for value, label in modes.items())
+    identity = (f'<input type="hidden" name="camera_id" value="{escape(camera_id)}">' if camera_id else
+                '<label>Camera ID <input name="camera_id" maxlength="64" placeholder="entry" required></label>')
+    form = f'''<form class="camera-form" method="post" action="/admin/cameras"><input type="hidden" name="csrf" value="{csrf}">
         {identity}<label>POST authentication <select name="mode">{options}</select></label>
-        <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
-        <label>Password <input type="password" name="password" autocomplete="new-password"></label>
-        <button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></form>'''
+        <div class="camera-auth-fields">
+            <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
+            <label>Password <input type="password" name="password" autocomplete="new-password"></label>
+        </div>
+        <div class="camera-actions"><button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></div></form>'''
+    if not camera_id:
+        return f'<div class="camera-card"><h4>Add a camera</h4>{form}</div>'
+    safe_id = escape(camera_id)
+    return f'''<details class="camera-card"><summary><strong>{safe_id}</strong>
+        <span class="camera-status muted">{modes[mode]}</span></summary>
+        <p>POST path <code>/api/axis/{safe_id}/events</code></p>{form}</details>'''
 
 
 def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
@@ -561,11 +580,10 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>Camera POST port <input type="number" name="port" min="1" max="65535" value="{camera_port or ''}" required></label>
             <p>Allow this TCP port for the cameras in your firewall before applying a change.</p>
             <button type="submit">Save camera port and restart</button></form>''' if restart and change_camera_port else ""
-        camera_port_status = (f"Camera POST listener port {camera_port}." if camera_online else
-                              f"Camera POST listener is offline on port {camera_port}.")
-        camera_help = "Use the camera port and the POST path shown for each camera."
-        if not change_camera_port:
-            camera_help += " In Docker, use the published camera port on the host."
+        camera_port_status = (f"PlateLog listens for camera events on port {camera_port}." if camera_online else
+                              f"The camera listener is offline on port {camera_port}.")
+        camera_help = ("Use this port with the POST path shown for each camera." if change_camera_port else
+                       "In Docker, send events to the host's published camera port and the POST path shown for each camera.")
         access = store.register_access()
         password_note = "Leave blank to keep the current staff password." if access["verifier"] else "Use at least 14 characters."
         access_form = f'''<section id="register-access"><h3>Register access</h3>
@@ -579,11 +597,9 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
             <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
-            <section><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
-            <p>
-            Camera IDs use lowercase letters, digits, dashes and underscores.
-            For HTTP Basic, set a username and a password of at least 14 characters. Leave the password blank to keep it for the same username.</p>
-            {cameras}{camera_form(csrf)}</section>
+            <section id="axis-cameras"><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
+            <p>HTTP Basic passwords must be at least 14 characters. For an existing camera, leave the password blank to keep it for the same username.</p>
+            {camera_form(csrf)}{cameras}</section>
             <section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
