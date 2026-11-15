@@ -95,6 +95,13 @@ fieldset label { display: inline-flex; align-items: center; gap: 4px; white-spac
 fieldset input { margin: 0; accent-color: #194b79; }
 .scroll { overflow-x: auto; } table { width: 100%; border-collapse: collapse; background: white; }
 caption { text-align: left; margin-bottom: 5px; }
+.register-page-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; margin-block: 8px; }
+.register-pages { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.register-pages a { display: grid; min-width: 1.9rem; min-height: 2rem; place-items: center; padding-inline: 4px;
+    border: 1px solid #d3dce5; border-radius: 4px; background: white; text-decoration: none; }
+.register-pages a[aria-current="page"] { background: #194b79; border-color: #194b79; color: white; font-weight: 650; }
+.register-live { font-size: .875rem; }
+#register-summary { margin-bottom: 5px; }
 th, td { text-align: left; padding: 7px clamp(6px, 1vw, 14px); border-bottom: 1px solid #d3dce5; white-space: nowrap; }
 thead { background: #e3ebf4; } .registration { font-weight: 650; } section { margin-top: 26px; }
 .photo { width: clamp(74px, 14vw, 212px); aspect-ratio: 3 / 2; display: block; object-fit: contain; border-radius: 4px; background: #e3ebf4; }
@@ -121,17 +128,35 @@ if (form) {
     const results = document.querySelector('#register-results');
     const status = document.querySelector('#search-status');
     let pending;
+    let rendered = results.innerHTML;
+    let filtersApplied = true;
 
-    async function filter() {
+    function currentPage() {
+        return Number(results.firstElementChild.dataset.registerPage);
+    }
+
+    function canRefresh() {
+        return filtersApplied && currentPage() === 1 && !document.hidden;
+    }
+
+    async function update(page, { automatic = false, pager } = {}) {
+        if (automatic && (pending || !canRefresh())) return;
         pending?.abort();
         const request = new AbortController();
         pending = request;
-        const params = new URLSearchParams();
-        for (const [key, value] of new FormData(form)) {
-            if (value.trim()) params.set(key, value.trim());
+        const params = new URLSearchParams(automatic ? window.location.search : '');
+        if (!automatic) {
+            for (const [key, value] of new FormData(form)) {
+                if (value.trim()) params.set(key, value.trim());
+            }
         }
+        if (page > 1) params.set('page', String(page));
+        else params.delete('page');
         const query = params.size ? `?${params}` : '';
-        status.textContent = '';
+        if (!automatic) {
+            filtersApplied = false;
+            status.textContent = '';
+        }
         try {
             const response = await fetch(`/register/results${query}`, { signal: request.signal });
             if (response.status === 401 && request === pending) {
@@ -141,15 +166,52 @@ if (form) {
             if (response.status === 400) throw new Error((await response.json()).detail);
             if (!response.ok) throw new Error('Could not update results. Try Search again.');
             const html = await response.text();
-            if (request !== pending || request.signal.aborted) return;
-            results.innerHTML = html;
-            history.replaceState(history.state, '', `/${query}`);
+            if (request !== pending || request.signal.aborted || (automatic && !canRefresh())) return;
+            if (html !== rendered) {
+                const scroll = results.querySelector('.scroll')?.scrollLeft;
+                const active = document.activeElement;
+                const focused = automatic && results.contains(active) && active.matches('a') ? active : null;
+                const focusedPager = focused?.closest('[data-pager]')?.dataset.pager;
+                results.innerHTML = html;
+                rendered = html;
+                const table = results.querySelector('.scroll');
+                if (scroll && table) table.scrollLeft = scroll;
+                if (focused) {
+                    const region = focusedPager ? results.querySelector(`[data-pager="${focusedPager}"]`) : table;
+                    Array.from(region?.querySelectorAll('a') ?? []).find(link =>
+                        link.href === focused.href && link.textContent === focused.textContent)?.focus({ preventScroll: true });
+                }
+            }
+            if (!automatic) {
+                filtersApplied = true;
+                const actualPage = currentPage();
+                if (actualPage > 1) params.set('page', String(actualPage));
+                else params.delete('page');
+                history.replaceState(history.state, '', params.size ? `/?${params}` : '/');
+                if (pager) {
+                    results.querySelector('[data-pager="top"] [aria-current="page"]')?.focus({ preventScroll: true });
+                    if (pager === 'bottom') results.scrollIntoView({ block: 'start' });
+                }
+            }
         } catch (error) {
-            if (request === pending && error.name !== 'AbortError') {
+            if (!automatic && request === pending && error.name !== 'AbortError') {
                 status.textContent = error.message;
             }
+        } finally {
+            if (request === pending) pending = undefined;
         }
     }
+
+    const filter = () => update(1);
+    const refresh = () => update(1, { automatic: true });
+    window.setInterval(refresh, 5000);
+    document.addEventListener('visibilitychange', refresh);
+    results.addEventListener('click', event => {
+        const link = event.target.closest('a[data-page]');
+        if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        update(Number(link.dataset.page), { pager: link.closest('[data-pager]')?.dataset.pager ?? 'top' });
+    });
 
     plate.addEventListener('input', filter);
     for (const input of [camera, form.elements.start, form.elements.end]) input.addEventListener('change', filter);
@@ -182,6 +244,8 @@ CAMERA_NAMES = {"demo-entry": "Demo entry", "demo-exit": "Demo exit"}
 CAMERA_AUTH_LABELS = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
 VEHICLE_COLUMNS = ("make", "model", "colour")
 REPORT_LIMIT = 10_000
+REGISTER_PAGE_SIZE = 50
+REGISTER_PAGE_LINKS = 10
 SESSION_SECONDS = 8 * 60 * 60
 ADMIN_COOKIE = "platelog_admin"
 STAFF_COOKIE = "platelog_staff"
@@ -1027,7 +1091,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                               start_ms=filters.start_ms, end_ms=filters.end_ms)
 
     @app.get("/", response_class=HTMLResponse, dependencies=signed_in)
-    def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
+    def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)], page: int = Query(1, ge=1)):
         options = ['<option value="">All cameras</option>']
         for key in sorted(set(CAMERAS) | store.passage_cameras()):
             selected = " selected" if filters.camera == key else ""
@@ -1042,15 +1106,43 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                           for key in VEHICLE_COLUMNS)
         toolbar = f'<div class="toolbar">{controls}<fieldset><legend>Columns</legend>{toggles}</fieldset></div>'
         return register_page(request, "Register", register_sign_out_form(request) + toolbar +
-                             '<p id="search-status" role="status"></p>' + f'<div id="register-results">{render_results(filters)}</div>')
+                             '<p id="search-status" role="status"></p>' + f'<div id="register-results">{render_results(filters, page)}</div>')
 
-    def render_results(filters: RegisterFilters) -> str:
-        rows = matching(filters, 101)
-        caption = f"Passages · {escape(str(filters.zone))}"
-        if len(rows) > 100:
-            caption += " · Latest 100 shown"
+    def pagination(filters: RegisterFilters, page: int, last: int, position: str) -> str:
+        if last < 2:
+            return ""
+        start = ((page - 1) // REGISTER_PAGE_LINKS) * REGISTER_PAGE_LINKS + 1
+        stop = min(start + REGISTER_PAGE_LINKS, last + 1)
+        links = [page_link(filters, page - 1, "Previous")] if page > 1 else []
+        links.extend(page_link(filters, index, str(index), label=f"Page {index}", current=index == page)
+                     for index in range(start, stop))
+        if page < last:
+            links.append(page_link(filters, page + 1, "Next"))
+        return f'<nav class="register-pages" data-pager="{position}" aria-label="Passage pages ({position})">{"".join(links)}</nav>'
+
+    def page_link(filters: RegisterFilters, page: int, text: str, *, label: str = "", current: bool = False) -> str:
+        params = {key: getattr(filters, key) for key in ("plate", "camera", "start", "end") if getattr(filters, key)}
+        if page > 1:
+            params["page"] = str(page)
+        href = "/?" + escape(urlencode(params)) if params else "/"
+        attributes = f' aria-label="{label}"' if label else ""
+        if current:
+            attributes += ' aria-current="page"'
+        return f'<a href="{href}" data-page="{page}"{attributes}>{text}</a>'
+
+    def render_results(filters: RegisterFilters, page: int) -> str:
+        rows, total, page = store.passage_page(filters.plate, filters.camera, page, REGISTER_PAGE_SIZE,
+                                              start_ms=filters.start_ms, end_ms=filters.end_ms)
+        if not rows:
+            return '<div data-register-page="1"><p class="register-live muted">Live updates</p><p role="status">No matching passages.</p></div>'
+        first = (page - 1) * REGISTER_PAGE_SIZE + 1
+        last = (total + REGISTER_PAGE_SIZE - 1) // REGISTER_PAGE_SIZE
+        caption = f"Showing {first}–{first + len(rows) - 1} of {total:,} passages · {escape(str(filters.zone))}"
+        live = "Live updates" if page == 1 else page_link(filters, 1, "Return to live")
+        top = f'<div class="register-page-bar"><span class="register-live muted">{live}</span>{pagination(filters, page, last, "top")}</div>'
+        bottom = f'<div class="register-page-bar">{pagination(filters, page, last, "bottom")}</div>' if last > 1 else ""
         result = []
-        for row in rows[:100]:
+        for row in rows:
             link = f"/passages/{row['id']}"
             plate_text = escape(row["plate"])
             photo_label = "Image expired" if row["photo_expired"] else "No image"
@@ -1065,16 +1157,15 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                             for key in VEHICLE_COLUMNS)
             result.append(f'''<tr><td>{photo}</td><td class="registration"><a href="{link}">{plate_text}</a></td>
                 <td>{date}</td><td><time datetime="{capture.isoformat()}" title="{capture.strftime('%Z %z')}">{time}</time></td>{cells}</tr>''')
-        if not result:
-            return '<p role="status">No matching passages.</p>'
         headings = "".join(f'<th scope="col" data-column="{key}">{key.title()}</th>' for key in VEHICLE_COLUMNS)
-        return f'''<div class="scroll"><table><caption>{caption}</caption>
+        return f'''<div data-register-page="{page}">{top}<p id="register-summary" class="muted">{caption}</p>
+            <div class="scroll"><table aria-labelledby="register-summary">
             <thead><tr><th scope="col">Image</th><th scope="col">Reg</th><th scope="col">Date</th><th scope="col">Time</th>{headings}</tr></thead>
-            <tbody>{"".join(result)}</tbody></table></div>'''
+            <tbody>{"".join(result)}</tbody></table></div>{bottom}</div>'''
 
     @app.get("/register/results", response_class=HTMLResponse, dependencies=signed_in)
-    def register_results(filters: Annotated[RegisterFilters, Depends(filters_for_request)]):
-        return render_results(filters)
+    def register_results(filters: Annotated[RegisterFilters, Depends(filters_for_request)], page: int = Query(1, ge=1)):
+        return render_results(filters, page)
 
     @app.get("/register/export", dependencies=signed_in)
     def export_register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)]):

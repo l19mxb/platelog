@@ -69,7 +69,9 @@ The server binds to loopback and stores this mode’s data in `.platelog-data/` 
 
 Run `python -m platelog preview --timezone Australia/Sydney`, then open `http://127.0.0.1:8765/`. Type part of a registration to filter the list as you type. Enter `AO1` to find the corrected entry by its original OCR read. Click its thumbnail or registration to open the original photo and packet history. Use the Columns controls to hide or show Make, Model or Colour. The browser remembers these settings.
 
-Set **From** and **To** to filter by the passage's first capture time in the displayed time zone. The selected **To** minute is included. Leave either bound blank to search without that limit. Choose **Export Excel** to download a summary with counts by camera and one row per matching passage. The Passages sheet embeds the register thumbnail before the registration. Open the register to see full-size photos. If a report exceeds 10,000 matches or 32 MiB of thumbnails, narrow the time range and try again.
+The register shows 50 passages per page, newest first. Page 1 updates automatically every five seconds with the current filters. Use the page links to browse older results and **Return to live** to resume automatic updates.
+
+Set **From** and **To** to filter by the passage's first capture time in the displayed time zone. The selected **To** minute is included. Leave either bound blank to search without that limit. Choose **Export Excel** to download a summary with counts by camera and one row per matching passage across all pages. The Passages sheet embeds the register thumbnail before the registration. Open the register to see full-size photos. If a report exceeds 10,000 matches or 32 MiB of thumbnails, narrow the time range and try again.
 
 The browser preview uses a fresh database unless you specify `--data-dir`. The two JPEG fixtures are generated images of front-facing vehicles with fictitious plates. The simulator supplies make, model and colour. Missing fields appear as a dash. Axis documents colour in `vehicle_info`. Make and model require a source that supplies them. A Docker image can serve the same preview:
 

@@ -70,6 +70,18 @@ CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCE
 """
 
 PACKET_ORDER = "capture_ms DESC, counter DESC, received_ms DESC, rowid DESC"
+PASSAGE_MATCH = """FROM passages p WHERE p.first_ms BETWEEN ? AND ?
+    AND (?='' OR p.camera=?) AND (?='' OR EXISTS (
+        SELECT 1 FROM packets r WHERE r.passage_id=p.id
+        AND (r.plate_key=? OR (? AND instr(r.plate_key,?)>0))))"""
+
+
+def passage_match_args(plate: str, camera: str, partial_plate: bool, start_ms: int | None, end_ms: int | None):
+    key = plate_key(plate)
+    if plate and not key:
+        return None
+    return (start_ms if start_ms is not None else 0, end_ms - 1 if end_ms is not None else 253402300799999,
+            camera, camera, key, key, partial_plate, key)
 DEFAULT_RETENTION = {"enabled": False, "passage_days": 360, "photo_days": 90}
 DEFAULT_REGISTER_ACCESS = {"required": False, "verifier": "", "revision": ""}
 
@@ -354,21 +366,29 @@ class Store:
 
     def passages(self, plate: str, camera: str, limit: int, *, partial_plate: bool = False,
                  start_ms: int | None = None, end_ms: int | None = None) -> list[dict]:
-        key = plate_key(plate)
-        if plate and not key:
+        args = passage_match_args(plate, camera, partial_plate, start_ms, end_ms)
+        if args is None:
             return []
         with closing(self.connect()) as db:
             db.execute("BEGIN")
-            rows = db.execute(
-                """SELECT * FROM passages p WHERE p.first_ms BETWEEN ? AND ?
-                   AND (?='' OR p.camera=?) AND (?='' OR EXISTS (
-                       SELECT 1 FROM packets r WHERE r.passage_id=p.id
-                       AND (r.plate_key=? OR (? AND instr(r.plate_key,?)>0))))
-                   ORDER BY p.first_ms DESC,p.id DESC LIMIT ?""",
-                (start_ms if start_ms is not None else 0, end_ms - 1 if end_ms is not None else 253402300799999,
-                 camera, camera, key, key, partial_plate, key, limit),
-            ).fetchall()
-            return [self._summary(db, row) for row in rows]
+            return self._matching_passages(db, args, limit)
+
+    def passage_page(self, plate: str, camera: str, page: int, size: int, *,
+                     start_ms: int | None = None, end_ms: int | None = None) -> tuple[list[dict], int, int]:
+        args = passage_match_args(plate, camera, True, start_ms, end_ms)
+        if args is None:
+            return [], 0, 1
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            total = db.execute(f"SELECT COUNT(*) {PASSAGE_MATCH}", args).fetchone()[0]
+            last = max(1, (total + size - 1) // size)
+            page = min(page, last)
+            return self._matching_passages(db, args, size, (page - 1) * size), total, page
+
+    def _matching_passages(self, db: sqlite3.Connection, args: tuple, limit: int, offset: int = 0) -> list[dict]:
+        rows = db.execute(f"SELECT p.* {PASSAGE_MATCH} ORDER BY p.first_ms DESC, p.id DESC LIMIT ? OFFSET ?",
+                          (*args, limit, offset)).fetchall()
+        return [self._summary(db, row) for row in rows]
 
     def report_passages(self, start_ms: int, end_ms: int):
         with closing(self.connect()) as db:
