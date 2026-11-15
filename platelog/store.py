@@ -131,6 +131,12 @@ class Store:
             self._audit(db, "Administrator password changed")
             return True
 
+    def initialize_admin_password(self, verifier: str) -> None:
+        with closing(self.connect()) as db, db:
+            inserted = db.execute("INSERT OR IGNORE INTO settings VALUES ('admin_password', ?)", (verifier,))
+            if inserted.rowcount:
+                self._audit(db, "Initial administrator password enabled")
+
     def register_access(self) -> dict:
         saved = self.setting("register_access")
         return json.loads(saved) if saved else DEFAULT_REGISTER_ACCESS.copy()

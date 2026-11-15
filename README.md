@@ -10,7 +10,7 @@ Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
 
 One of the simulated camera captures features `L19MXB`, a nod to PlateLog’s creator.
 
-![Simulated camera capture of a burgundy minivan with the L19MXB number plate](docs/images/demo-l19mxb.jpg)
+![Simulated camera capture of a black 2023 Subaru WRX Sportswagon with the L19MXB number plate](docs/images/demo-l19mxb.jpg)
 
 ## Quick start
 
@@ -105,9 +105,6 @@ For an empty, persistent instance with camera intake and Admin settings, load th
 
 ```sh
 sudo install -d -m 0750 -o 65532 -g 65532 "$PWD/platelog-data"
-docker run --rm -it --pull=never \
-  --mount "type=bind,source=$PWD/platelog-data,target=/data" \
-  platelog-preview:latest admin-password --data-dir /data
 docker run -d --name platelog --restart unless-stopped --pull=never \
   --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m,mode=1777 \
   --mount "type=bind,source=$PWD/platelog-data,target=/data" \
@@ -115,16 +112,17 @@ docker run -d --name platelog --restart unless-stopped --pull=never \
   preview --host 0.0.0.0 --allowed-host '*' --data-dir /data --no-demo
 ```
 
-Sign in to **Admin** on TCP `8765` and register each camera before sending events to TCP `8766`. For scheduled CSV reports, `/data` is writable by default with this setup. An additional destination can be mounted when creating the container.
+Sign in to **Admin** on TCP `8765` with the initial password `admin`, then set a new password to unlock settings. Register each camera before sending events to TCP `8766`. For scheduled CSV reports, `/data` is writable by default with this setup. An additional destination can be mounted when creating the container.
 
 ## Admin
 
-Set a password interactively, then start the preview with the same persistent directory:
+Start the preview with a persistent directory:
 
 ```sh
-python -m platelog admin-password --data-dir .platelog-data
 python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney --manage-web-port
 ```
+
+When no administrator password has been set, sign in with `admin`, enter a new password of at least 14 characters, then sign in with the new password. The initial sign-in only opens the password change form. To set your own password before opening the listener, run `python -m platelog admin-password --data-dir .platelog-data` first.
 
 The register opens without sign-in by default. To require sign-in, sign in to **Admin**, set a separate staff password under **Register access**, and enable **Require staff sign-in to view the register**. Staff can use the register, search, passage details, photos and Excel exports. Only the administrator password opens both the register and **Admin**, including camera settings, retention, scheduled reports and service controls. Changing register access or rotating the staff password ends staff sessions. Upgrading removes any previously enabled staff access to Admin.
 
@@ -134,7 +132,7 @@ Under **Daily CSV report**, enable the schedule, choose a time such as `00:05`, 
 
 For a remote Windows share, use a UNC folder such as `\\fileserver\reports\PlateLog`. In Docker, mount the destination into the container and enter its path inside the container. [Microsoft guidance on services and redirected drives](https://learn.microsoft.com/en-us/windows/win32/services/services-and-redirected-drives)
 
-The administrator password starts unset. Set it from the terminal to enable Admin sign-in. Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
+Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
 
 **Admin → Display** changes the time zone used for the register, date and time filters, and Excel reports. On native installs with `--manage-web-port`, **Admin → Service** sets the staff web port and **Admin → Axis cameras** sets the dedicated camera POST port. They default to `8765` and `8766`. Allow a new TCP port in the firewall before applying it. Saving either port restarts PlateLog. When the camera port changes, update the POST destinations on the cameras. The staff web port passed at launch is the fallback if the saved staff port is occupied at startup. If the camera port is unavailable, the register and Admin can still start.
 
@@ -147,6 +145,14 @@ For a native Windows Server preview with no Internet access, see the [offline bu
 Use a persistent `--data-dir` to enable the camera listener. Starting with `--no-demo` and a fresh data directory gives you an empty register for a trial. In **Admin → Axis cameras**, add a camera ID such as `entry`. Select **HTTP Basic** and set a username and password, or select **No credentials** for a network where IT restricts access to the camera. Camera POSTs are accepted once a camera is configured and enabled. Camera settings apply when saved.
 
 In AXIS License Plate Verifier, open **Integration → Push events**, select **HTTP POST**, and enter the camera listener address and path. For `entry` on the default port, use `http://SERVER-NAME:8766/api/axis/entry/events`. If you selected Basic, enter the same username and password on the camera. Use the camera's **Test** button and check that the test plate appears on the register. PlateLog accepts JSON and multipart from configured cameras. Verify the target firmware with a controlled pass before accepting a live deployment. [Axis push event setup](https://help.axis.com/en-us/axis-license-plate-verifier#push-event-information-to-third-party-software) · [Axis push event API](https://developer.axis.com/vapix/applications/license-plate-verifier-api/#push-events)
+
+To test a configured receiver from PowerShell, send the `L19MXB` demo as Axis JSON with the JPEG in `ImageArray[].BinaryImage`.
+
+```powershell
+.\examples\Send-AxisEvent.ps1 -Uri http://127.0.0.1:8766/api/axis/entry/events
+```
+
+For HTTP Basic, append `-Credential (Get-Credential)` and enter the camera credential from **Admin → Axis cameras**. To replay a captured request body byte for byte, add `-CapturePath .\axis-capture.json`. For a raw multipart capture, pass its original `-ContentType` including the boundary.
 
 For a persistent Docker instance, publish the staff and camera ports separately, for example `-p 8765:8765 -p 8766:8766`. To use a different camera port on the host, change the first number in the camera mapping. Keep `--manage-web-port` off in Docker so its internal ports stay aligned with the published mappings.
 

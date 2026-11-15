@@ -7,6 +7,7 @@ from threading import Lock
 
 
 _password_lock = Lock()
+INITIAL_ADMIN_PREFIX = "initial:"
 
 
 def password_key(password: str, salt: bytes) -> bytes:
@@ -17,6 +18,14 @@ def password_key(password: str, salt: bytes) -> bytes:
 def password_verifier(password: str) -> str:
     if not 14 <= len(password) or len(password.encode()) > 1024:
         raise ValueError("Use at least 14 characters and no more than 1024 bytes.")
+    return _salted_verifier(password)
+
+
+def initial_admin_verifier() -> str:
+    return INITIAL_ADMIN_PREFIX + _salted_verifier("admin")
+
+
+def _salted_verifier(password: str) -> str:
     salt = secrets.token_bytes(16)
     key = password_key(password, salt)
     return f"{salt.hex()}:{key.hex()}"

@@ -6,7 +6,7 @@ The x64 ZIP includes a signed Python 3.13.17 offline installer, WinSW 2.12.0 for
 
 1. Compare the ZIP's SHA-256 against the separate `.sha256` file and scan the bundle. `COMPONENTS.tsv` lists the versions, sources and checksums. Python is signed by the Python Software Foundation. WinSW and `Setup.ps1` are unsigned. Use IT's application-control and script-signing process if required.
 2. Transfer the ZIP using the site's approved process. If RDP drive redirection is allowed, select the transfer drive under **Local Resources → More → Drives** before connecting. Copy the ZIP to an administrator-controlled location on the server and extract it to a fresh local folder. [Microsoft drive redirection policy](https://learn.microsoft.com/en-us/windows/client-management/mdm/policy-csp-remotedesktopservices#donotallowdriveredirection)
-3. Open **PowerShell as Administrator** in the extracted folder and run the setup. Enter and confirm a new PlateLog admin password of at least 14 characters at the prompt. If the server requires signed scripts, have IT sign the reviewed script or apply its standard script approval process.
+3. Open **PowerShell as Administrator** in the extracted folder and run the setup. If the server requires signed scripts, have IT sign the reviewed script or apply its standard script approval process.
 
    ```powershell
    .\Setup.ps1
@@ -14,11 +14,11 @@ The x64 ZIP includes a signed Python 3.13.17 offline installer, WinSW 2.12.0 for
 
    Setup checks the bundle, installs Python if required, installs the locked dependencies offline, registers and starts the `PlateLog` service, and checks `/healthz`. The service starts at boot under `LocalService`. Code lives under `%ProgramFiles%\PlateLog`. Data and logs live under `%ProgramData%\PlateLog`. Setup is for a fresh install and stops if it finds an existing one.
 
-4. From another desk, open `http://SERVER-NAME:8765/` using the server's hostname or IPv4 address. Check the two sample rows and photos, search for `AO1`, and open the Excel report. Open **Admin** at the same address and use the password set during setup to change retention settings.
+4. From another desk, open `http://SERVER-NAME:8765/` using the server's hostname or IPv4 address. Check the two sample rows and photos, search for `AO1`, and open the Excel report. Open **Admin**, sign in with `admin`, and set a new password of at least 14 characters to unlock settings.
 
 ## Network access
 
-The preview listens on all IPv4 interfaces (`0.0.0.0:8765`). Setup adds a Windows Firewall allow rule for the PlateLog listener on TCP 8765 from `Any` source by default. Routing, network firewalls and Group Policy still determine which desks can connect. The register, photos and Excel export are available to anyone who can reach the listener. This bundle contains only synthetic plates. Admin requires the password set during setup. HTTP carries the password and session cookie in clear text. [Windows Firewall rule address and port scoping](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
+The preview listens on all IPv4 interfaces (`0.0.0.0:8765`). Setup adds a Windows Firewall allow rule for the PlateLog listener on TCP 8765 from `Any` source by default. Routing, network firewalls and Group Policy still determine which desks can connect. The register, photos and Excel export are available to anyone who can reach the listener. This bundle contains only synthetic captures. Admin uses the new password after the first change. HTTP carries the password and session cookie in clear text. [Windows Firewall rule address and port scoping](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule)
 
 To protect the staff register and its direct photo and export links, set a separate staff password and enable **Require staff sign-in to view the register** under **Admin → Register access**. The staff password grants access to the register. The administrator password grants access to both the register and Admin settings.
 

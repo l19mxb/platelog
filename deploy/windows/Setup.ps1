@@ -113,8 +113,6 @@ try {
 
     Push-Location -LiteralPath $app
     try {
-        & $venvPython -E -B -m platelog admin-password --data-dir $data
-        if ($LASTEXITCODE -ne 0) { throw 'PlateLog administrator password was not set.' }
         & $wrapper install
         if ($LASTEXITCODE -ne 0) { throw 'Could not install the PlateLog Windows service.' }
         $installedService = $true

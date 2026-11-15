@@ -27,7 +27,7 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .credentials import password_matches, password_verifier
+from .credentials import INITIAL_ADMIN_PREFIX, initial_admin_verifier, password_matches, password_verifier
 from .daily_csv import export_due_report, report_folder, report_schedule
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .store import Store
@@ -422,9 +422,12 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             return state[1]
         return None
 
-    def admin_csrf(request: Request) -> str | None:
+    def admin_csrf(request: Request, *, allow_initial: bool = False) -> str | None:
         state = sessions.get(session_key(request))
-        return session_csrf(state, credential(request)) if state else None
+        revision = credential(request) if state else None
+        if not revision or (not allow_initial and revision.startswith(INITIAL_ADMIN_PREFIX)):
+            return None
+        return session_csrf(state, revision)
 
     def staff_csrf(request: Request, config: dict) -> str | None:
         if config["required"] and transport_ok(request):
@@ -526,6 +529,17 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>Administrator password <input type="password" name="password" autocomplete="current-password" required></label>
             <button type="submit">Sign in</button></form>''', status)
 
+    def password_form(csrf: str) -> str:
+        return f'''<section><h3>Change administrator password</h3>
+            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
+            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
+            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
+            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
+            <button type="submit">Change password</button></form></section>'''
+
+    def initial_password_page(csrf: str, message: str = "Choose a new password to unlock Admin.", status: int = 200) -> HTMLResponse:
+        return show(f'<p role="status">{escape(message)}</p>{password_form(csrf)}', status)
+
     def dashboard(csrf: str, message: str = "", status: int = 200) -> HTMLResponse:
         retention = store.retention()
         counts, audit = store.admin_overview()
@@ -560,12 +574,6 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>New staff password <input type="password" name="password" minlength="14" autocomplete="new-password"></label>
             <button type="submit">Save register access</button></form>
             <p>{password_note} The staff password opens the register. The administrator password opens both the register and Admin.</p></section>'''
-        password_form = f'''<section><h3>Change administrator password</h3>
-            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
-            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
-            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
-            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
-            <button type="submit">Change password</button></form></section>'''
         return show(f'''<p class="notice" role="status">{escape(message)}</p>{access_form}{restart_form}
             <section><h3>Display</h3><form method="post" action="/admin/timezone">
             <input type="hidden" name="csrf" value="{csrf}">
@@ -589,7 +597,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
             Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
             <button type="submit">Purge now</button></form></section>
-            {csv_schedule_form(store, csrf, zone)}{password_form}
+            {csv_schedule_form(store, csrf, zone)}{password_form(csrf)}
             <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
             <dt>Events</dt><dd>{counts['packets']:,}</dd>
             <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
@@ -605,10 +613,13 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
             return show("<p>This server requires HTTPS for Admin sign-in.</p>")
-        if not credential(request):
+        current = credential(request)
+        if not current:
             return show("<p>Set an administrator password on the server to activate this tab.</p>")
-        csrf = admin_csrf(request)
+        csrf = admin_csrf(request, allow_initial=True)
         if csrf:
+            if current.startswith(INITIAL_ADMIN_PREFIX):
+                return initial_password_page(csrf)
             message = ("Register access saved." if access_saved else "CSV schedule saved." if csv_saved else
                        "Retention settings saved." if saved else "")
             return dashboard(csrf, message)
@@ -627,13 +638,14 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         login_attempts.append(now)
         async with password_check:
             if (verifier != credential(request)
-                    or not await run_in_threadpool(password_matches, fields.get("password", ""), verifier)):
+                    or not await run_in_threadpool(password_matches, fields.get("password", ""),
+                                                   verifier.removeprefix(INITIAL_ADMIN_PREFIX))):
                 return login_page("Incorrect password.", 401)
             login_attempts.clear()
         return sign_in(request, "/admin", ADMIN_COOKIE, sessions, verifier)
 
-    async def authorized_form(request: Request, limit: int = 4096) -> tuple[str, dict[str, str]]:
-        csrf = admin_csrf(request)
+    async def authorized_form(request: Request, limit: int = 4096, *, allow_initial: bool = False) -> tuple[str, dict[str, str]]:
+        csrf = admin_csrf(request, allow_initial=allow_initial)
         if not csrf:
             raise HTTPException(403, "Sign in as administrator.")
         fields = await admin_form(request, limit)
@@ -748,19 +760,23 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     @app.post("/admin/password")
     async def change_password(request: Request):
         current = credential(request)
-        csrf, fields = await authorized_form(request, limit=10_240)
+        csrf, fields = await authorized_form(request, limit=10_240, allow_initial=True)
+        if not current or current != credential(request):
+            raise HTTPException(403, "Sign in again to change the password.")
+        render = initial_password_page if current.startswith(INITIAL_ADMIN_PREFIX) else dashboard
         value = fields.get("new_password", "")
         if value != fields.get("confirm_password"):
-            return dashboard(csrf, "The new passwords did not match.", 400)
+            return render(csrf, "The new passwords did not match.", 400)
         async with password_check:
             if not current or current != credential(request):
                 raise HTTPException(403, "Sign in again to change the password.")
-            if not await run_in_threadpool(password_matches, fields.get("current_password", ""), current):
-                return dashboard(csrf, "Incorrect current password.", 401)
+            if not await run_in_threadpool(password_matches, fields.get("current_password", ""),
+                                           current.removeprefix(INITIAL_ADMIN_PREFIX)):
+                return render(csrf, "Incorrect current password.", 401)
             try:
                 replacement = await run_in_threadpool(password_verifier, value)
             except ValueError as exc:
-                return dashboard(csrf, str(exc), 400)
+                return render(csrf, str(exc), 400)
             if not await run_in_threadpool(store.change_admin_password, current, replacement):
                 raise HTTPException(403, "Sign in again to change the password.")
             sessions.clear()
@@ -840,6 +856,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
     if allowed_host != "*" and not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", allowed_host):
         raise ValueError("Expected a hostname, IPv4 address, or '*' for --allowed-host")
     store = Store(data_dir)
+    if persistent and store.setting("admin_password") is None:
+        store.initialize_admin_password(initial_admin_verifier())
 
     async def supervise_retention():
         while True:
