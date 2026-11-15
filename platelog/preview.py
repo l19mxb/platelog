@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from html import escape
 from io import BytesIO
 from pathlib import Path
+from sqlite3 import Row
 from typing import Annotated, Callable
 from urllib.parse import parse_qs, urlencode, urlsplit
 from xml.sax.saxutils import escape as xml_escape
@@ -54,12 +55,21 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .admin dl { display: grid; grid-template-columns: max-content auto; gap: 4px 18px; }
 .admin dd { margin: 0; } .admin ul { padding-inline-start: 1.4rem; }
 .admin .notice { border-inline-start: 4px solid #194b79; padding-inline-start: 10px; }
-.camera-card { padding: 12px 14px; margin-top: 10px; background: #fff; border: 1px solid #d3dce5; border-radius: 6px; }
-.camera-card summary { cursor: pointer; overflow-wrap: anywhere; }
-.camera-card summary:focus-visible { outline: 3px solid #ac5d00; }
-.camera-status { margin-inline-start: 8px; font-size: .875rem; }
-.camera-card h4 { margin: 0; }
-.camera-card code { overflow-wrap: anywhere; }
+.camera-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.camera-heading h3, .camera-editor h4 { margin: 0; }
+.camera-add { padding: 5px 10px; border-radius: 5px; background: #194b79; color: white; text-decoration: none; }
+.camera-table { border: 1px solid #d3dce5; border-radius: 6px; }
+.camera-table th, .camera-table td { padding: 8px 10px; font-size: .875rem; }
+.camera-table tbody th { font-weight: 650; }
+.camera-table tbody tr:last-child > * { border-bottom: 0; }
+.camera-table :is(th, td):last-child { position: sticky; inset-inline-end: 0; }
+.camera-table td:last-child { background: white; }
+.camera-table thead th:last-child { background: #e3ebf4; }
+.camera-table tr[data-selected] > * { background: #edf4fa; }
+.camera-scroll-hint { display: none; }
+@media (max-width: 44rem) { .camera-scroll-hint { display: block; font-size: .875rem; } }
+.camera-editor { padding: 12px 14px; margin-top: 12px; background: #fff; border: 1px solid #d3dce5; border-radius: 6px; }
+.camera-editor code { overflow-wrap: anywhere; }
 .admin .camera-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr)); }
 .camera-form input, .camera-form select { box-sizing: border-box; width: 100%; min-width: 0; }
 .camera-form .camera-auth-fields { display: contents; }
@@ -68,7 +78,7 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .camera-password label { font-weight: 600; }
 .camera-password [aria-invalid="true"] { border-color: #912323; }
 .camera-password-error { color: #912323; font-weight: 600; }
-.camera-form .camera-actions { grid-column: 1 / -1; }
+.camera-form .camera-actions { display: flex; align-items: center; gap: 12px; grid-column: 1 / -1; }
 #csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
 #csv-reports code { overflow-wrap: anywhere; }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
@@ -169,6 +179,7 @@ if (form) {
 }
 """
 CAMERA_NAMES = {"demo-entry": "Demo entry", "demo-exit": "Demo exit"}
+CAMERA_AUTH_LABELS = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
 VEHICLE_COLUMNS = ("make", "model", "colour")
 REPORT_LIMIT = 10_000
 SESSION_SECONDS = 8 * 60 * 60
@@ -371,33 +382,58 @@ async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
-class CameraPasswordError:
+class CameraFormError:
     camera_id: str
+    mode: str
     username: str
     message: str
+    password_invalid: bool = False
+
+
+def camera_table(rows: list[Row], selected: str | None) -> str:
+    if not rows:
+        return '<p class="muted">No cameras have been added.</p>'
+    entries = []
+    for row in rows:
+        camera_id = escape(row["id"])
+        camera_url = urlencode({"camera": row["id"]})
+        mode = row["mode"]
+        username = escape(row["username"]) if mode == "basic" and row["username"] else "—"
+        active = " data-selected" if row["id"] == selected else ""
+        entries.append(f'''<tr{active}><th scope="row">{camera_id}</th>
+            <td><code>/api/axis/{camera_id}/events</code></td><td>{CAMERA_AUTH_LABELS[mode]}</td>
+            <td>{username}</td><td><a href="/admin?{camera_url}#camera-editor" aria-label="Edit {camera_id}">Edit</a></td></tr>''')
+    return f'''<p class="camera-scroll-hint muted">Scroll sideways to see all columns.</p>
+        <div class="scroll camera-table" role="region" aria-label="Saved Axis cameras" tabindex="0">
+        <table aria-label="Axis cameras"><thead><tr><th scope="col">Camera</th><th scope="col">POST path</th>
+        <th scope="col">Authentication</th><th scope="col">Username</th><th scope="col">Actions</th></tr></thead>
+        <tbody>{"".join(entries)}</tbody></table></div>'''
 
 
 def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username: str = "", *,
-                password_error: CameraPasswordError | None = None) -> str:
-    modes = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
-    draft_mode = "basic" if password_error else mode
-    if password_error:
-        username = password_error.username
-    options = "".join(f'<option value="{value}"{" selected" if value == draft_mode else ""}>{label}</option>'
-                      for value, label in modes.items())
+                error: CameraFormError | None = None) -> str:
+    if error:
+        mode, username = error.mode, error.username
+    options = "".join(f'<option value="{value}"{" selected" if value == mode else ""}>{label}</option>'
+                      for value, label in CAMERA_AUTH_LABELS.items())
     safe_id = escape(camera_id)
-    draft_id = escape(password_error.camera_id) if password_error else ""
+    draft_id = escape(error.camera_id) if error else ""
     identity = (f'<input type="hidden" name="camera_id" value="{safe_id}">' if camera_id else
                 f'<label>Camera ID <input name="camera_id" value="{draft_id}" maxlength="64" placeholder="entry" required></label>')
     password_id = f"camera-password-saved-{safe_id}" if camera_id else "camera-password-new"
     hint_id = f"{password_id}-hint"
-    if password_error:
-        hint = f'<small id="{hint_id}" class="camera-password-error" role="alert">{escape(password_error.message)}</small>'
+    password_invalid = error is not None and error.password_invalid
+    if password_invalid:
+        hint = f'<small id="{hint_id}" class="camera-password-error" role="alert">{escape(error.message)}</small>'
     else:
         keep = " Leave blank to keep it for the same username." if camera_id and username else ""
         hint = f'<small id="{hint_id}" class="muted">At least {MIN_PASSWORD_LENGTH} characters.{keep}</small>'
-    invalid = ' aria-invalid="true" autofocus' if password_error else ""
-    form = f'''<form class="camera-form" method="post" action="/admin/cameras"><input type="hidden" name="csrf" value="{csrf}">
+    invalid = ' aria-invalid="true" autofocus' if password_invalid else ""
+    alert = f'<p class="camera-password-error" role="alert">{escape(error.message)}</p>' if error and not password_invalid else ""
+    title = f"Edit {safe_id}" if camera_id else "Add a camera"
+    path = f'<p>POST path <code>/api/axis/{safe_id}/events</code></p>' if camera_id else ""
+    return f'''<div id="camera-editor" class="camera-editor"><h4>{title}</h4>{path}{alert}
+    <form class="camera-form" method="post" action="/admin/cameras#camera-editor"><input type="hidden" name="csrf" value="{csrf}">
         {identity}<label>POST authentication <select name="mode">{options}</select></label>
         <div class="camera-auth-fields">
             <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
@@ -406,13 +442,8 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
                 minlength="{MIN_PASSWORD_LENGTH}" aria-describedby="{hint_id}"{invalid}>
             {hint}</div>
         </div>
-        <div class="camera-actions"><button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></div></form>'''
-    if not camera_id:
-        return f'<div class="camera-card"><h4>Add a camera</h4>{form}</div>'
-    opened = " open" if password_error else ""
-    return f'''<details class="camera-card"{opened}><summary><strong>{safe_id}</strong>
-        <span class="camera-status muted">{modes[mode]}</span></summary>
-        <p>POST path <code>/api/axis/{safe_id}/events</code></p>{form}</details>'''
+        <div class="camera-actions"><button type="submit">{'Save camera' if camera_id else 'Add camera'}</button>
+        <a href="/admin#axis-cameras">Cancel</a></div></form></div>'''
 
 
 def csv_schedule_form(store: Store, csrf: str, zone: str) -> str:
@@ -593,18 +624,22 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     def initial_password_page(csrf: str, message: str = "Choose a new password to unlock Admin.", status: int = 200) -> HTMLResponse:
         return show(f'<p role="status">{escape(message)}</p>{password_form(csrf)}', status)
 
-    def dashboard(csrf: str, message: str = "", status: int = 200, *,
-                  camera_error: CameraPasswordError | None = None) -> HTMLResponse:
+    def dashboard(csrf: str, message: str = "", status: int = 200, *, camera_selection: str | None = None,
+                  camera_error: CameraFormError | None = None, camera_saved: str = "") -> HTMLResponse:
         retention = store.retention()
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
         changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
         camera_rows = store.cameras()
-        cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"],
-                                      password_error=camera_error if camera_error and row["id"] == camera_error.camera_id else None)
-                          for row in camera_rows)
-        new_camera_error = (camera_error if camera_error and
-                            all(row["id"] != camera_error.camera_id for row in camera_rows) else None)
+        if camera_error:
+            camera_selection = camera_error.camera_id
+        selected = next((row for row in camera_rows if row["id"] == camera_selection), None)
+        editor = ""
+        if selected is not None:
+            editor = camera_form(csrf, selected["id"], selected["mode"], selected["username"], error=camera_error)
+        elif camera_selection == "" or camera_error:
+            editor = camera_form(csrf, error=camera_error)
+        camera_notice = f'<p role="status">Saved camera {escape(camera_saved)}.</p>' if camera_saved else ""
         zone = store.setting("display_timezone") or str(display_zone)
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
@@ -637,8 +672,10 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
             <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
-            <section id="axis-cameras"><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
-            {camera_form(csrf, password_error=new_camera_error)}{cameras}</section>
+            <section id="axis-cameras"><div class="camera-heading"><h3>Axis cameras</h3>
+            <a class="camera-add" href="/admin?camera=#camera-editor">Add camera</a></div>
+            <p>{camera_port_status} {camera_help}</p>{camera_port_form}{camera_notice}
+            {camera_table(camera_rows, camera_selection)}{editor}</section>
             <section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
@@ -663,7 +700,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False,
-              access_saved: bool = False):
+              access_saved: bool = False, camera: str | None = None, camera_saved: str = ""):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -677,7 +714,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 return initial_password_page(csrf)
             message = ("Register access saved." if access_saved else "CSV schedule saved." if csv_saved else
                        "Retention settings saved." if saved else "")
-            return dashboard(csrf, message)
+            return dashboard(csrf, message, camera_selection=camera, camera_saved=camera_saved)
         return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
     @app.post("/admin/login")
@@ -777,19 +814,24 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         mode = fields.get("mode", "")
         username = fields.get("username", "").strip() if mode == "basic" else ""
         password = fields.get("password", "") if mode == "basic" else ""
+
+        def reject(message: str, *, password_invalid: bool = False) -> HTMLResponse:
+            error = CameraFormError(camera_id, mode, username, message, password_invalid)
+            return dashboard(csrf, status=400, camera_error=error)
+
         if not re.fullmatch(CAMERA_ID_PATTERN, camera_id) or camera_id in CAMERAS:
-            return dashboard(csrf, "Use a unique camera ID with lowercase letters, digits, dashes or underscores.", 400)
-        if mode not in {"disabled", "basic", "none"}:
-            return dashboard(csrf, "Choose a camera authentication mode.", 400)
+            return reject("Use a unique camera ID with lowercase letters, digits, dashes or underscores.")
+        if mode not in CAMERA_AUTH_LABELS:
+            return reject("Choose a camera authentication mode.")
         if mode == "basic" and not re.fullmatch(r"[!-9;-~]{1,128}", username):
-            return dashboard(csrf, "Enter a camera username without spaces or colons.", 400)
+            return reject("Enter a camera username without spaces or colons.")
         try:
             async with password_check:
                 verifier = await run_in_threadpool(password_verifier, password) if password else ""
             await run_in_threadpool(store.save_camera, camera_id, mode, username, verifier)
         except ValueError as exc:
-            return dashboard(csrf, status=400, camera_error=CameraPasswordError(camera_id, username, str(exc)))
-        return dashboard(csrf, f"Saved camera {camera_id}.")
+            return reject(str(exc), password_invalid=True)
+        return RedirectResponse(f'/admin?{urlencode({"camera_saved": camera_id})}#axis-cameras', status_code=303)
 
     @app.post("/admin/timezone")
     async def save_timezone(request: Request):
