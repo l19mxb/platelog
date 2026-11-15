@@ -8,6 +8,7 @@ from threading import Lock
 
 _password_lock = Lock()
 INITIAL_ADMIN_PREFIX = "initial:"
+MIN_PASSWORD_LENGTH = 14
 
 
 def password_key(password: str, salt: bytes) -> bytes:
@@ -16,8 +17,10 @@ def password_key(password: str, salt: bytes) -> bytes:
 
 
 def password_verifier(password: str) -> str:
-    if not 14 <= len(password) or len(password.encode()) > 1024:
-        raise ValueError("Use at least 14 characters and no more than 1024 bytes.")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    if len(password.encode()) > 1024:
+        raise ValueError("Password must be no more than 1024 bytes.")
     return _salted_verifier(password)
 
 

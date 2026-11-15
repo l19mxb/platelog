@@ -27,7 +27,13 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .credentials import INITIAL_ADMIN_PREFIX, initial_admin_verifier, password_matches, password_verifier
+from .credentials import (
+    INITIAL_ADMIN_PREFIX,
+    MIN_PASSWORD_LENGTH,
+    initial_admin_verifier,
+    password_matches,
+    password_verifier,
+)
 from .daily_csv import export_due_report, report_folder, report_schedule
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .store import Store
@@ -58,6 +64,10 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .camera-form input, .camera-form select { box-sizing: border-box; width: 100%; min-width: 0; }
 .camera-form .camera-auth-fields { display: contents; }
 .camera-form:has(select option:checked:not([value="basic"])) .camera-auth-fields { display: none; }
+.camera-password { display: grid; gap: 4px; }
+.camera-password label { font-weight: 600; }
+.camera-password [aria-invalid="true"] { border-color: #912323; }
+.camera-password-error { color: #912323; font-weight: 600; }
 .camera-form .camera-actions { grid-column: 1 / -1; }
 #csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
 #csv-reports code { overflow-wrap: anywhere; }
@@ -360,23 +370,47 @@ async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
     return {name: values[0] for name, values in fields.items()}
 
 
-def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username: str = "") -> str:
+@dataclass(frozen=True)
+class CameraPasswordError:
+    camera_id: str
+    username: str
+    message: str
+
+
+def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username: str = "", *,
+                password_error: CameraPasswordError | None = None) -> str:
     modes = {"disabled": "Disabled", "basic": "HTTP Basic", "none": "No credentials"}
-    options = "".join(f'<option value="{value}"{" selected" if value == mode else ""}>{label}</option>'
+    draft_mode = "basic" if password_error else mode
+    if password_error:
+        username = password_error.username
+    options = "".join(f'<option value="{value}"{" selected" if value == draft_mode else ""}>{label}</option>'
                       for value, label in modes.items())
-    identity = (f'<input type="hidden" name="camera_id" value="{escape(camera_id)}">' if camera_id else
-                '<label>Camera ID <input name="camera_id" maxlength="64" placeholder="entry" required></label>')
+    safe_id = escape(camera_id)
+    draft_id = escape(password_error.camera_id) if password_error else ""
+    identity = (f'<input type="hidden" name="camera_id" value="{safe_id}">' if camera_id else
+                f'<label>Camera ID <input name="camera_id" value="{draft_id}" maxlength="64" placeholder="entry" required></label>')
+    password_id = f"camera-password-saved-{safe_id}" if camera_id else "camera-password-new"
+    hint_id = f"{password_id}-hint"
+    if password_error:
+        hint = f'<small id="{hint_id}" class="camera-password-error" role="alert">{escape(password_error.message)}</small>'
+    else:
+        keep = " Leave blank to keep it for the same username." if camera_id and username else ""
+        hint = f'<small id="{hint_id}" class="muted">At least {MIN_PASSWORD_LENGTH} characters.{keep}</small>'
+    invalid = ' aria-invalid="true" autofocus' if password_error else ""
     form = f'''<form class="camera-form" method="post" action="/admin/cameras"><input type="hidden" name="csrf" value="{csrf}">
         {identity}<label>POST authentication <select name="mode">{options}</select></label>
         <div class="camera-auth-fields">
             <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
-            <label>Password <input type="password" name="password" autocomplete="new-password"></label>
+            <div class="camera-password"><label for="{password_id}">Password</label>
+            <input id="{password_id}" type="password" name="password" autocomplete="new-password"
+                minlength="{MIN_PASSWORD_LENGTH}" aria-describedby="{hint_id}"{invalid}>
+            {hint}</div>
         </div>
         <div class="camera-actions"><button type="submit">{'Save camera' if camera_id else 'Add camera'}</button></div></form>'''
     if not camera_id:
         return f'<div class="camera-card"><h4>Add a camera</h4>{form}</div>'
-    safe_id = escape(camera_id)
-    return f'''<details class="camera-card"><summary><strong>{safe_id}</strong>
+    opened = " open" if password_error else ""
+    return f'''<details class="camera-card"{opened}><summary><strong>{safe_id}</strong>
         <span class="camera-status muted">{modes[mode]}</span></summary>
         <p>POST path <code>/api/axis/{safe_id}/events</code></p>{form}</details>'''
 
@@ -559,12 +593,18 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     def initial_password_page(csrf: str, message: str = "Choose a new password to unlock Admin.", status: int = 200) -> HTMLResponse:
         return show(f'<p role="status">{escape(message)}</p>{password_form(csrf)}', status)
 
-    def dashboard(csrf: str, message: str = "", status: int = 200) -> HTMLResponse:
+    def dashboard(csrf: str, message: str = "", status: int = 200, *,
+                  camera_error: CameraPasswordError | None = None) -> HTMLResponse:
         retention = store.retention()
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
         changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
-        cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"]) for row in store.cameras())
+        camera_rows = store.cameras()
+        cameras = "".join(camera_form(csrf, row["id"], row["mode"], row["username"],
+                                      password_error=camera_error if camera_error and row["id"] == camera_error.camera_id else None)
+                          for row in camera_rows)
+        new_camera_error = (camera_error if camera_error and
+                            all(row["id"] != camera_error.camera_id for row in camera_rows) else None)
         zone = store.setting("display_timezone") or str(display_zone)
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
@@ -598,8 +638,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
             <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
             <section id="axis-cameras"><h3>Axis cameras</h3><p>{camera_port_status} {camera_help}</p>{camera_port_form}
-            <p>HTTP Basic passwords must be at least 14 characters. For an existing camera, leave the password blank to keep it for the same username.</p>
-            {camera_form(csrf)}{cameras}</section>
+            {camera_form(csrf, password_error=new_camera_error)}{cameras}</section>
             <section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
@@ -749,7 +788,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 verifier = await run_in_threadpool(password_verifier, password) if password else ""
             await run_in_threadpool(store.save_camera, camera_id, mode, username, verifier)
         except ValueError as exc:
-            return dashboard(csrf, str(exc), 400)
+            return dashboard(csrf, status=400, camera_error=CameraPasswordError(camera_id, username, str(exc)))
         return dashboard(csrf, f"Saved camera {camera_id}.")
 
     @app.post("/admin/timezone")
