@@ -28,37 +28,65 @@ if ($PSCmdlet.ParameterSetName -eq 'Replay') {
     $photo = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $ImagePath).ProviderPath)
     $now = [DateTimeOffset]::UtcNow
     $milliseconds = $now.ToUnixTimeMilliseconds()
+    $plate = 'L19MXB'
+    $cameraAddress = '192.0.2.1'
+    $cameraImage = '/local/fflprapp/tools.cgi?action=getImage&name=testplate.jpg'
     $event = [ordered]@{
         packetCounter = [string]$milliseconds
         capture_timestamp = [string]$milliseconds
-        frame_timestamp = [string]($milliseconds * 1000)
+        frame_timestamp = [string]$milliseconds
         capture_ts = [string]($milliseconds * 1000000)
         datetime = $now.ToString('yyyyMMdd HHmmssfff', [Globalization.CultureInfo]::InvariantCulture)
-        plateText = 'L19MXB'
-        plateUnicode = 'L19MXB'
-        plateUTF8 = 'L19MXB'
-        plateASCII = 'L19MXB'
+        plateText = $plate
+        plateUnicode = $plate
+        plateUTF8 = $plate
+        plateASCII = $plate
         plateCountry = 'AUS'
         'plateISO3166-2' = 'AU-NSW'
-        plateConfidence = '0.990000'
-        carState = 'lost'
+        plateType = '(null)'
+        plateRegion = 'NSW'
+        plateRegionCode = 'NSW'
+        plateList = ''
+        plateListMode = ''
+        plateListDescription = ''
+        plateConfidence = '0.950000'
+        carState = 'new'
         roiID = '1'
-        imageType = 'vehicle'
+        geotag = [ordered]@{ lat = 0.0; lon = 0.0 }
+        imageType = 'plate'
         plateImageType = 'jpeg'
-        plateImageSize = [string]$photo.Length
+        plateImageSize = '0'
         carMoveDirection = 'in'
+        timeProcessing = '0'
+        plateCoordinates = @(0, 0, 0, 0)
+        plateCoordinatesRelative = @(0, 0, 0, 0)
         carID = [string](Get-Random -Minimum 100000 -Maximum 999999)
-        profileID = '1'
+        GEOtarget = 'Camera'
+        imagesURI = @($cameraImage, $cameraImage)
         ImageArray = @([ordered]@{
-            ImageType = 'vehicle'
+            ImageType = ''
             ImageFormat = 'jpg'
             BinaryImage = [Convert]::ToBase64String($photo)
         })
-        vehicle_info = @{ view = 'front'; type = 'CAR'; color = 'BLACK'; make = 'Subaru'; model = '2023 WRX Sportswagon' }
-        camera_info = @{ SerialNumber = '020000000001'; ProdShortName = 'AXIS Q1700-LE'; IPAddress = '192.0.2.1'; MACAddress = '020000000001' }
-        sensorProviderID = 'platelog-test'
+        imageFile = 'localdata/images/testplate.jpg'
+        imageFile2 = 'localdata/images/testplate.jpg'
+        profileID = '1'
+        vehicle_info = [ordered]@{ view = 'front'; type = 'CAR'; color = 'BLACK' }
+        camera_info = [ordered]@{
+            SerialNumber = '020000000001'
+            ProdShortName = 'AXIS Q1700-LE'
+            IPAddress = $cameraAddress
+            MACAddress = '020000000001'
+        }
+        sensorProviderID = $cameraAddress
     }
-    $body = [Text.Encoding]::UTF8.GetBytes(($event | ConvertTo-Json -Depth 8 -Compress))
+    # The Q1700-LE uses JSON Unicode escapes in these two fields and plain text in the UTF-8 and ASCII fields.
+    $escapedPlate = ($plate.ToCharArray() | ForEach-Object { '\u{0:X4}' -f [int]$_ }) -join ''
+    $json = $event | ConvertTo-Json -Depth 8 -Compress
+    foreach ($field in 'plateText', 'plateUnicode') {
+        $json = $json.Replace(('"{0}":"{1}"' -f $field, $plate), ('"{0}":"{1}"' -f $field, $escapedPlate))
+    }
+    $body = [Text.Encoding]::UTF8.GetBytes($json)
 }
 
 $headers = @{}
