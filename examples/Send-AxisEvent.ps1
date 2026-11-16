@@ -71,7 +71,7 @@ if ($PSCmdlet.ParameterSetName -eq 'Replay') {
         imageFile = 'localdata/images/testplate.jpg'
         imageFile2 = 'localdata/images/testplate.jpg'
         profileID = '1'
-        vehicle_info = [ordered]@{ view = 'front'; type = 'CAR'; color = 'BLACK' }
+        vehicle_info = [ordered]@{ view = 'front'; type = 'CAR'; make = 'Subaru'; model = 'WRX Wagon'; color = 'BLACK' }
         camera_info = [ordered]@{
             SerialNumber = '020000000001'
             ProdShortName = 'AXIS Q1700-LE'

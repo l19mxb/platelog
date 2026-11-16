@@ -146,6 +146,32 @@ Admin and staff sign-in work over HTTP once their passwords are configured. To r
 
 For a native Windows Server preview with no Internet access, see the [offline bundle and Windows service setup](deploy/windows/README.md).
 
+## Run the HTTPS pilot from Python source
+
+Use the `pilot` command for a persistent register over HTTPS. On Windows, the tested offline runtime is CPython 3.15.2 x64 with SQLite 3.53.4. Check the SQLite version bundled with the interpreter before accepting live data. Install the pinned dependencies in a virtual environment. For offline use, transfer the source, a reviewed wheelhouse for the target Python and Windows architecture, and its hash-locked requirements. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
+
+1. Give the server an internal DNS name and create its DNS record. Obtain a Server Authentication certificate with that DNS name in its Subject Alternative Name from a CA approved by the site. Prepare `server.pem` with the leaf followed by any required intermediates and keep the matching `server-key.pem` readable by the runtime account. Distribute the public CA certificate through the site's managed trust process if workstations do not already trust it. [Microsoft certificate deployment](https://learn.microsoft.com/en-us/windows-server/identity/ad-fs/deployment/distribute-certificates-group-policy)
+2. Set the pilot Administrator password and start PlateLog from the source folder. Use your approved DNS name, certificate paths, and data folder in place of the examples.
+
+   ```powershell
+   python -E -s -B -m platelog admin-password --data-dir C:\ProgramData\PlateLog\data
+   python -E -s -B -m platelog pilot --data-dir C:\ProgramData\PlateLog\data `
+       --allowed-host platelog.example.internal --tls-cert C:\PlateLog\tls\server.pem `
+       --tls-key C:\PlateLog\tls\server-key.pem
+   ```
+
+3. Allow staff HTTPS from approved networks on TCP 443. Change the port with `--port` if needed. On a fresh pilot register, staff sign-in starts required. Open `/admin` over HTTPS and set a staff password in **Register access**. Use your approved Windows process supervisor to start the pilot with the same arguments and runtime identity.
+4. When ready for camera inputs, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and point it to `https://<name>:8766/api/axis/<id>/events`. Confirm certificate trust and run a controlled test on the real camera.
+
+For a standalone Windows workstation where IT approves a manual import, use the public DER `.cer` file and SHA-256 fingerprint supplied through a trusted IT channel. The script checks the exact certificate and adds it to the current user's trust store. Add `-WhatIf` to preview the import. For managed staff PCs use the site's central certificate deployment. [Windows certificate stores](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/inspect-certificates-manage-certificate-stores)
+
+```powershell
+.\examples\Trust-PlateLogCertificate.ps1 `
+    -CertificatePath 'C:\IT\platelog-ca.cer' -ExpectedSha256 '<64-character SHA-256 from IT>'
+```
+
+Open `https://<name>/` on a staff workstation and check that the browser loads the sign-in page with normal certificate validation.
+
 ### Configure Axis HTTP POST
 
 Use a persistent `--data-dir` to enable the camera listener. Starting with `--no-demo` and a fresh data directory gives you an empty register for a trial. In **Admin → Axis cameras**, add a camera ID such as `entry`. Select **HTTP Basic** and set a username and password, or select **No credentials** for a network where IT restricts access to the camera. Camera POSTs are accepted once a camera is configured and enabled. Camera settings apply when saved.

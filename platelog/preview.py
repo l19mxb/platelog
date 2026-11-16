@@ -619,7 +619,8 @@ def register_destination(value: str) -> str:
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
                  change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo,
-                 camera_port: int | None, camera_online: bool, change_camera_port: Callable[[int], None] | None):
+                 camera_port: int | None, camera_online: bool, change_camera_port: Callable[[int], None] | None,
+                 pilot_camera_transport: str | None):
     sessions: dict[str, tuple[float, str, str]] = {}
     staff_sessions: dict[str, tuple[float, str, str]] = {}
     login_attempts: list[float] = []
@@ -629,6 +630,12 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
 
     def transport_ok(request: Request) -> bool:
         return allow_http_admin or request.url.scheme == "https"
+
+    def register_access() -> dict:
+        config = store.register_access()
+        if pilot_camera_transport is not None and not config["revision"]:
+            config["required"] = True
+        return config
 
     def session_key(request: Request, cookie: str = ADMIN_COOKIE) -> str:
         token = request.cookies.get(cookie, "")
@@ -657,7 +664,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     def require_register(request: Request) -> None:
         if not persistent:
             return
-        config = store.register_access()
+        config = register_access()
         if not config["required"] or admin_csrf(request):
             return
         if csrf := staff_csrf(request, config):
@@ -694,6 +701,10 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return response
 
     def register_login_page(destination: str, message: str = "", status: int = 200) -> HTMLResponse:
+        if not register_access()["verifier"]:
+            return HTMLResponse(page("Staff sign-in", '<section><h2>Staff sign-in</h2>'
+                                     '<p>An administrator needs to set the staff password in <a href="/admin">Admin</a>.</p>'
+                                     '</section>'), status_code=status)
         notice = f'<p role="alert">{escape(message)}</p>' if message else ""
         return HTMLResponse(page("Staff sign-in", f'''<section><h2>Staff sign-in</h2>{notice}
             <form method="post" action="/login"><input type="hidden" name="next" value="{escape(destination)}">
@@ -703,7 +714,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     @app.get("/login")
     def register_login(request: Request, next: str = "/"):
         destination = register_destination(next)
-        config = store.register_access() if persistent else None
+        config = register_access() if persistent else None
         if not config or not config["required"] or admin_csrf(request) or staff_csrf(request, config):
             return RedirectResponse(destination, status_code=303)
         if not transport_ok(request):
@@ -714,11 +725,13 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     async def register_sign_in(request: Request):
         fields = await admin_form(request, limit=12_288)
         destination = register_destination(fields.get("next", ""))
-        config = store.register_access() if persistent else None
+        config = register_access() if persistent else None
         if not config or not config["required"]:
             return RedirectResponse(destination, status_code=303)
         if not transport_ok(request):
             raise HTTPException(403, "Staff sign-in requires HTTPS.")
+        if not config["verifier"]:
+            return register_login_page(destination, status=403)
         now = time.monotonic()
         staff_attempts[:] = [attempt for attempt in staff_attempts if now - attempt < 300]
         if len(staff_attempts) >= 5:
@@ -734,7 +747,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     @app.post("/logout")
     async def register_logout(request: Request):
         fields = await admin_form(request)
-        config = store.register_access() if persistent else None
+        config = register_access() if persistent else None
         csrf = staff_csrf(request, config) if config else None
         if not csrf or not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
             raise HTTPException(403, "Reload the register before signing out.")
@@ -796,7 +809,13 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                               f"The camera listener is offline on port {camera_port}.")
         camera_help = ("Use this port with the POST path shown for each camera." if change_camera_port else
                        "In Docker, send events to the host's published camera port and the POST path shown for each camera.")
-        access = store.register_access()
+        if pilot_camera_transport == "off":
+            camera_port_status = "The Axis camera listener is disabled."
+            camera_help = "Enable it at launch before connecting cameras."
+        elif pilot_camera_transport is not None:
+            camera_port_status = f"PlateLog listens for camera events over {pilot_camera_transport.upper()} on port {camera_port}."
+            camera_help = "Use this port with the POST path below."
+        access = register_access()
         password_note = "Leave blank to keep the current staff password." if access["verifier"] else "Use at least 14 characters."
         access_form = f'''<section id="register-access"><h3>Register access</h3>
             <form method="post" action="/admin/register-access"><input type="hidden" name="csrf" value="{csrf}">
@@ -1092,7 +1111,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                  *, persistent: bool = False, allow_http_admin: bool = True,
                  restart: Callable[[], None] | None = None, web_port: int | None = None,
                  change_web_port: Callable[[int], None] | None = None, camera_port: int | None = None,
-                 camera_online: bool = False, change_camera_port: Callable[[int], None] | None = None) -> FastAPI:
+                 camera_online: bool = False, change_camera_port: Callable[[int], None] | None = None,
+                 pilot_camera_transport: str | None = None) -> FastAPI:
     if allowed_host != "*" and not re.fullmatch(r"[a-zA-Z0-9.-]{1,253}", allowed_host):
         raise ValueError("Expected a hostname, IPv4 address, or '*' for --allowed-host")
     store = Store(data_dir)
@@ -1131,7 +1151,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
     require_register, register_sign_out_form = admin_routes(
         app, store, persistent, allow_http_admin, restart, web_port, change_web_port, display_zone,
-        camera_port, camera_online, change_camera_port,
+        camera_port, camera_online, change_camera_port, pilot_camera_transport,
     )
     signed_in = [Depends(require_register)]
 
@@ -1145,7 +1165,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     @app.get("/healthz")
     def health():
-        return {"status": "ready", "mode": "synthetic-preview"}
+        return {"status": "ready", "mode": "pilot" if pilot_camera_transport is not None else "synthetic-preview"}
 
     @app.get("/preview.css")
     def stylesheet():

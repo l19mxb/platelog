@@ -167,7 +167,7 @@ class Store:
             verifier = verifier or current["verifier"]
             if required and not verifier:
                 raise ValueError("Set a staff password before requiring sign-in.")
-            if (required, verifier) == (current["required"], current["verifier"]) and "staff_admin" not in current:
+            if saved and (required, verifier) == (current["required"], current["verifier"]) and "staff_admin" not in current:
                 return
             value = json.dumps({"required": required, "verifier": verifier, "revision": uuid4().hex})
             db.execute("INSERT INTO settings VALUES ('register_access', ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
