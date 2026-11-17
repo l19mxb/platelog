@@ -100,18 +100,16 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .import-samples ul { margin-block: 4px; max-height: 10rem; overflow-y: auto; }
 .register-stats { margin: 0 0 14px; padding: 8px 12px; border: 1px solid #d3dce5; border-radius: 6px; background: white; }
 .register-stats h2 { font-size: 1rem; }
-.stats-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; margin: 3px 0 5px; }
-.stats-metrics dt, .stats-metrics small { font-size: .78rem; color: #4b5d70; }
+.stats-metrics { display: flex; flex-wrap: wrap; gap: 6px clamp(24px, 5vw, 72px); margin: 5px 0 8px; }
+.stats-metrics dt { font-size: .78rem; color: #4b5d70; }
 .stats-metrics dd { margin: 0; font-weight: 700; line-height: 1.22; font-variant-numeric: tabular-nums; }
-.stats-metrics small { font-weight: 500; }
 .stats-chart { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 8px; }
-.stats-chart svg { display: block; width: 100%; height: 52px; }
+.stats-chart svg { display: block; width: 100%; height: 56px; }
 .stats-grid { stroke: #d3dce5; fill: none; }
 .stats-line { stroke: #194b79; stroke-width: 2; stroke-linejoin: round; fill: none; }
 .stats-x, .stats-y { display: flex; justify-content: space-between; color: #4b5d70; font-size: .72rem; line-height: 1.15; }
 .stats-x { grid-column: 2; padding-top: 3px; }
 .stats-y { flex-direction: column; align-items: end; }
-@media (max-width: 38rem) { .stats-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 form label { display: grid; gap: 4px; font-weight: 600; } input, select, button { font: inherit; padding: 6px 8px; }

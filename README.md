@@ -2,7 +2,7 @@
 
 PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings. A persistent instance can receive Axis HTTP POST events into the same register. The [v1 specification](technical-spec.md) describes the wider pilot.
 
-![PlateLog register showing synthetic vehicle photos, the clock and last read time, Excel export options, and pagination](docs/images/register.png)
+![PlateLog register with a 24-hour line graph, total vehicle passes, unregistered vehicles, and a synthetic L19MXB passage](docs/images/register.png)
 
 Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
 
@@ -71,7 +71,7 @@ Run `python -m platelog preview --timezone Australia/Sydney`, then open `http://
 
 The register shows 50 passages per page, newest first. Page 1 updates automatically every five seconds with the current filters. Use the page links to browse older results and **Return to live** to resume automatic updates. The header shows the server clock and when PlateLog last saved a camera read, across all cameras. The clock uses the register's display time zone and the read time updates even while browsing older pages.
 
-**Vehicle activity** updates every five seconds and shows the last 24 hours in 15-minute intervals. Total passes counts each passage. Unique plates and unregistered vehicles count distinct plate numbers. The busiest hour shows the highest number of passes in any 60-minute span in the window. The camera dropdown applies to the chart. The chart retains its 24-hour window while you search or browse older passages. Register rows show **Registered** in black or **Unregistered** in red, with a matching photo border. Both the rows and the activity summary use the current registered list.
+**Vehicle activity** updates every five seconds and plots vehicle passes in 15-minute intervals over the last 24 hours. **Total vehicle passes** counts each passage. **Unregistered vehicles** counts distinct plates absent from the current registered list. The camera dropdown applies to the chart. The chart retains its 24-hour window while you search or browse older passages. Register rows show **Registered** in black or **Unregistered** in red, with a matching photo border. Both the rows and the activity summary use the current registered list.
 
 Set **From** and **To** to filter by the passage's first capture time in the displayed time zone. The selected **To** minute is included. Leave either bound blank to search without that limit. **Export Excel** downloads a summary with counts by camera and one row per matching passage across all pages, with a thumbnail before the registration. **Excel without photos** keeps the passage data and photo counts in a smaller workbook.
 
