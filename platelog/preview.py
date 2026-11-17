@@ -38,7 +38,10 @@ from .credentials import (
 )
 from .daily_csv import check_report_folder, export_due_report, report_folder, report_schedule
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
-from .store import Store
+from .register_stats import render_stats
+from .registered_refresh import refresh_due_registrations, refresh_schedule, refresh_status, save_refresh_schedule
+from .store import RegistrationChanged, Store
+from .vehicle_import import IMPORT_BYTES, parse_plates
 
 CSS = """
 :root { font: 16px/1.5 system-ui, sans-serif; color: #172638; background: #f4f7fa; }
@@ -88,6 +91,27 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 #csv-reports .destination { flex: 1 1 18rem; max-width: 100%; min-width: 0; }
 #csv-reports code { overflow-wrap: anywhere; }
 #csv-reports .folder-result { padding-inline-start: 8px; border-inline-start: 3px solid #194b79; overflow-wrap: anywhere; }
+#registered-vehicles .import-file { min-width: 0; }
+#registered-vehicles [hidden] { display: none; }
+#registered-vehicles [data-import-message]:empty { display: none; }
+#registered-vehicles [data-import-preview] { padding: 12px; margin-top: 12px; border: 1px solid #d3dce5; background: white; }
+#registered-refresh .source-path { flex: 1 1 20rem; min-width: 0; }
+.import-samples { display: flex; flex-wrap: wrap; gap: 10px 28px; }
+.import-samples ul { margin-block: 4px; max-height: 10rem; overflow-y: auto; }
+.register-stats { margin: 0 0 14px; padding: 8px 12px; border: 1px solid #d3dce5; border-radius: 6px; background: white; }
+.register-stats h2 { font-size: 1rem; }
+.stats-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; margin: 3px 0 5px; }
+.stats-metrics dt, .stats-metrics small { font-size: .78rem; color: #4b5d70; }
+.stats-metrics dd { margin: 0; font-weight: 700; line-height: 1.22; font-variant-numeric: tabular-nums; }
+.stats-metrics small { font-weight: 500; }
+.stats-chart { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 8px; }
+.stats-chart svg { display: block; width: 100%; height: 52px; }
+.stats-grid { stroke: #d3dce5; fill: none; }
+.stats-line { stroke: #194b79; stroke-width: 2; stroke-linejoin: round; fill: none; }
+.stats-x, .stats-y { display: flex; justify-content: space-between; color: #4b5d70; font-size: .72rem; line-height: 1.15; }
+.stats-x { grid-column: 2; padding-top: 3px; }
+.stats-y { flex-direction: column; align-items: end; }
+@media (max-width: 38rem) { .stats-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .toolbar { display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 form label { display: grid; gap: 4px; font-weight: 600; } input, select, button { font: inherit; padding: 6px 8px; }
@@ -113,6 +137,11 @@ th, td { text-align: left; padding: 7px clamp(6px, 1vw, 14px); border-bottom: 1p
 thead { background: #e3ebf4; } .registration { font-weight: 650; } section { margin-top: 26px; }
 .photo { width: clamp(74px, 14vw, 212px); aspect-ratio: 3 / 2; display: block; object-fit: contain; border-radius: 4px; background: #e3ebf4; }
 .no-photo { display: grid; place-items: center; font-size: .78rem; }
+tr[data-registered] { --registration-color: #161616; }
+tr[data-registered="false"] { --registration-color: #a21b25; }
+tr[data-registered] .photo { box-sizing: border-box; border: 2px solid var(--registration-color); }
+tr[data-registered] .registration a, .registration-status { color: var(--registration-color); }
+.registration-status { display: block; font-size: .75rem; }
 td[data-column] { white-space: normal; overflow-wrap: anywhere; }
 figure { margin: 12px 0; } figure img { display: block; width: auto; max-width: min(100%, 640px); height: auto; border-radius: 5px; }
 main:has(#show-make:not(:checked)) [data-column="make"],
@@ -187,9 +216,12 @@ if (form) {
     const plate = form.elements.plate;
     const camera = form.elements.camera;
     const results = document.querySelector('#register-results');
+    const stats = document.querySelector('#register-stats-content');
     const status = document.querySelector('#search-status');
     let pending;
+    let statsPending;
     let rendered = results.innerHTML;
+    let renderedStats = stats.innerHTML;
     let filtersApplied = true;
 
     function currentPage() {
@@ -263,10 +295,33 @@ if (form) {
         }
     }
 
+    async function updateStats() {
+        if (document.hidden) return;
+        const selected = camera.value;
+        if (statsPending?.camera === selected) return;
+        statsPending?.request.abort();
+        const request = new AbortController();
+        statsPending = { request, camera: selected };
+        try {
+            const query = new URLSearchParams({ camera: selected });
+            const response = await fetch(`/register/stats?${query}`, { signal: request.signal });
+            if (!response.ok) return;
+            const html = await response.text();
+            if (!request.signal.aborted && selected === camera.value && html !== renderedStats) {
+                stats.innerHTML = html;
+                renderedStats = html;
+            }
+        } catch {} finally {
+            if (statsPending?.request === request) statsPending = undefined;
+        }
+    }
+
     const filter = () => update(1);
     const refresh = () => update(1, { automatic: true });
     window.setInterval(refresh, 5000);
+    window.setInterval(updateStats, 5000);
     document.addEventListener('visibilitychange', refresh);
+    document.addEventListener('visibilitychange', updateStats);
     results.addEventListener('click', event => {
         const link = event.target.closest('a[data-page]');
         if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
@@ -276,6 +331,7 @@ if (form) {
 
     plate.addEventListener('input', filter);
     for (const input of [camera, form.elements.start, form.elements.end]) input.addEventListener('change', filter);
+    camera.addEventListener('change', updateStats);
     form.addEventListener('submit', event => {
         if (event.submitter?.hasAttribute('data-export')) {
             const { start, end } = form.elements;
@@ -297,7 +353,112 @@ if (form) {
         form.elements.start.value = '';
         form.elements.end.value = '';
         filter();
+        updateStats();
         plate.focus();
+    });
+}
+
+const vehicleImport = document.querySelector('#vehicle-import');
+if (vehicleImport) {
+    const fileInput = vehicleImport.elements.plate_file;
+    const modeInput = vehicleImport.elements.import_mode;
+    const previewButton = vehicleImport.querySelector('button');
+    const region = document.querySelector('#registered-vehicles');
+    const message = region.querySelector('[data-import-message]');
+    const preview = region.querySelector('[data-import-preview]');
+    const confirmation = region.querySelector('[data-import-confirm]');
+    const replaceCheck = confirmation.elements.confirm_replace;
+    let reviewed;
+
+    function resetPreview() {
+        reviewed = undefined;
+        preview.hidden = true;
+        replaceCheck.checked = false;
+    }
+
+    for (const field of [fileInput, modeInput]) {
+        field.addEventListener('change', () => {
+            resetPreview();
+            message.textContent = '';
+        });
+    }
+
+    async function upload(action, selection) {
+        const { file, mode, format, receipt } = selection;
+        const query = new URLSearchParams({ mode, format });
+        const headers = { 'X-CSRF-Token': vehicleImport.dataset.csrf };
+        if (receipt) headers['X-Import-Receipt'] = receipt;
+        if (replaceCheck.checked) headers['X-Confirm-Replace'] = 'yes';
+        const response = await fetch(`/admin/registered-vehicles/${action}?${query}`, {
+            method: 'POST', headers, body: file,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail);
+        return result;
+    }
+
+    async function withUpload(action) {
+        const apply = confirmation.querySelector('button');
+        for (const field of [fileInput, modeInput, previewButton, apply, replaceCheck]) field.disabled = true;
+        try {
+            await action();
+        } catch (error) {
+            resetPreview();
+            message.textContent = error.message || 'The upload failed. Try again.';
+        } finally {
+            for (const field of [fileInput, modeInput, previewButton, apply, replaceCheck]) field.disabled = false;
+        }
+    }
+
+    function showSample(selector, texts) {
+        const list = preview.querySelector(selector);
+        list.replaceChildren(...texts.map(text => {
+            const item = document.createElement('li');
+            item.textContent = text;
+            return item;
+        }));
+        list.parentElement.hidden = texts.length === 0;
+    }
+
+    vehicleImport.addEventListener('submit', event => {
+        event.preventDefault();
+        resetPreview();
+        const file = fileInput.files[0];
+        if (!file) return;
+        const format = file.name.split('.').pop().toLowerCase();
+        if (!['csv', 'xlsx'].includes(format)) {
+            message.textContent = 'Choose a CSV or .xlsx file.';
+            return;
+        }
+        const mode = modeInput.value;
+        message.textContent = 'Reading plate list…';
+        withUpload(async () => {
+            const result = await upload('preview', { file, mode, format });
+            reviewed = { file, mode, format, receipt: result.receipt };
+            preview.querySelector('[data-import-summary]').textContent =
+                `${result.added.toLocaleString()} added · ${result.existing.toLocaleString()} kept from file · ` +
+                `${result.removed.toLocaleString()} removed · ${result.duplicates.toLocaleString()} duplicate rows skipped · ` +
+                `${result.total.toLocaleString()} plates after import`;
+            showSample('[data-import-sample]', result.sample.map(row => `${row.action}: ${row.plate}`));
+            showSample('[data-import-removals]', result.removed_sample);
+            replaceCheck.required = mode === 'replace';
+            replaceCheck.parentElement.hidden = mode !== 'replace';
+            preview.hidden = false;
+            message.textContent = 'Preview ready. Review the changes before applying.';
+        });
+    });
+
+    confirmation.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!reviewed) return;
+        message.textContent = 'Importing plates…';
+        withUpload(async () => {
+            const result = await upload('apply', reviewed);
+            region.querySelector('[data-registered-count]').textContent = result.total.toLocaleString();
+            message.textContent = `Import complete. ${result.added.toLocaleString()} added, ${result.removed.toLocaleString()} removed.`;
+            vehicleImport.reset();
+            resetPreview();
+        });
     });
 }
 """
@@ -494,10 +655,14 @@ def set_admin_password(store: Store, password: str) -> None:
     store.set_setting("admin_password", password_verifier(password), "Administrator password set")
 
 
-async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
+def require_form_origin(request: Request) -> None:
     expected = f"{request.url.scheme}://{request.headers.get('host')}"
     if request.headers.get("origin") != expected:
         raise HTTPException(403, "Submit the form from the PlateLog Admin page.")
+
+
+async def admin_form(request: Request, limit: int = 4096) -> dict[str, str]:
+    require_form_origin(request)
     if request.headers.get("content-type", "").partition(";")[0] != "application/x-www-form-urlencoded":
         raise HTTPException(415, "Expected a form submission.")
     body = bytearray()
@@ -616,6 +781,59 @@ def register_destination(value: str) -> str:
     return "/"
 
 
+def registered_refresh_form(store: Store, csrf: str, zone: str, *, draft: dict | None = None,
+                            notice: str = "") -> str:
+    schedule = draft if draft is not None else refresh_schedule(store)
+    status = refresh_status(store)
+    attempt = status.get("last_attempt", {})
+    success = status.get("last_success")
+
+    def run_time(entry: dict) -> str:
+        recorded = datetime.fromisoformat(entry["attempted_at"])
+        return f'<time datetime="{recorded.isoformat()}">{recorded:%d/%m/%Y %H:%M:%S %z}</time>'
+
+    result = "<p>No successful refresh yet.</p>"
+    if success:
+        result = (f'<p>Last successful refresh {run_time(success)}. '
+                  f'{success["total"]:,} plates · {success["added"]:,} added · {success["removed"]:,} removed.</p>')
+    if attempt.get("error"):
+        result += (f'<p>Last refresh failed {run_time(attempt)}. {escape(attempt["error"])} '
+                   'The current list was kept.</p>')
+    message = f'<p class="notice" role="status">{escape(notice)}</p>' if notice else ""
+    return f'''<section id="registered-refresh"><h4>Scheduled list refresh</h4>
+        <p>Replace the registered list once a day from a CSV in {escape(zone)} time.</p>
+        <form method="post" action="/admin/registered-refresh#registered-refresh">
+            <input type="hidden" name="csrf" value="{csrf}">
+            <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule["enabled"] else ''}> Enable scheduled refresh</label>
+            <label class="source-path">CSV file path <input name="source" value="{escape(schedule["source"])}" maxlength="1024" spellcheck="false"></label>
+            <label>Refresh time <input type="time" name="run_time" value="{escape(schedule["run_time"])}" required></label>
+            <button type="submit">Save refresh schedule</button></form>
+        <p>Use a full path on the server or a Windows UNC share that the PlateLog service can read.</p>
+        {message}{result}</section>'''
+
+
+def registered_vehicles_form(csrf: str, count: int, refresh: str) -> str:
+    return f'''<section id="registered-vehicles"><h3>Registered vehicles</h3>
+        <p><strong data-registered-count>{count:,}</strong> registered plates ·
+        <a href="/admin/registered-vehicles/template.csv" class="camera-add">Download CSV template</a></p>
+        <p>Use a column named Plate in your CSV or the first Excel sheet. Format the Excel Plate column as Text to keep leading zeros.</p>
+        <form id="vehicle-import" data-csrf="{csrf}" method="post">
+            <label class="import-file">Plate list <input type="file" name="plate_file" accept=".csv,.xlsx" required></label>
+            <label>Import mode <select name="import_mode"><option value="add">Add to existing list</option>
+            <option value="replace">Replace entire list</option></select></label>
+            <button type="submit">Preview import</button></form>
+        <p data-import-message role="status"></p>
+        <div data-import-preview hidden>
+            <h4>Review import</h4><p data-import-summary></p>
+            <div class="import-samples"><div>First 20 file entries<ul data-import-sample></ul></div>
+                <div hidden>First 20 removals<ul data-import-removals></ul></div></div>
+            <form data-import-confirm method="post">
+                <label class="enable" hidden><input type="checkbox" name="confirm_replace" value="yes">
+                Remove all currently registered plates missing from this file</label>
+                <button type="submit">Apply import</button></form>
+        </div>{refresh}</section>'''
+
+
 def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin: bool,
                  restart: Callable[[], None] | None, web_port: int | None,
                  change_web_port: Callable[[int], None] | None, display_zone: timezone | ZoneInfo,
@@ -626,6 +844,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     login_attempts: list[float] = []
     staff_attempts: list[float] = []
     password_check = asyncio.Lock()
+    import_secret = secrets.token_bytes(32)
     restarting = False
 
     def transport_ok(request: Request) -> bool:
@@ -775,7 +994,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
 
     def dashboard(csrf: str, message: str = "", status: int = 200, *, camera_selection: str | None = None,
                   camera_error: CameraFormError | None = None, camera_saved: str = "",
-                  csv_draft: dict | None = None, folder_result: str = "") -> HTMLResponse:
+                  csv_draft: dict | None = None, folder_result: str = "",
+                  refresh_draft: dict | None = None, refresh_notice: str = "") -> HTMLResponse:
         retention = store.retention()
         counts, audit = store.admin_overview()
         last = store.setting("retention_last_run")
@@ -791,6 +1011,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             editor = camera_form(csrf, error=camera_error)
         camera_notice = f'<p role="status">Saved camera {escape(camera_saved)}.</p>' if camera_saved else ""
         zone = store.setting("display_timezone") or str(display_zone)
+        refresh = registered_refresh_form(store, csrf, zone, draft=refresh_draft, notice=refresh_notice)
         port_form = f'''<form method="post" action="/admin/web-port">
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Staff web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
@@ -832,6 +1053,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <a class="camera-add" href="/admin?camera=#camera-editor">Add camera</a></div>
             <p>{camera_port_status} {camera_help}</p>{camera_port_form}{camera_notice}
             {camera_table(camera_rows, camera_selection)}{editor}</section>
+            {registered_vehicles_form(csrf, store.registered_count(), refresh)}
             <section><h3>Retention</h3>
             <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
             <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
@@ -856,7 +1078,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False,
-              access_saved: bool = False, camera: str | None = None, camera_saved: str = ""):
+              access_saved: bool = False, camera: str | None = None, camera_saved: str = "",
+              refresh_saved: bool = False):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -870,7 +1093,9 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 return initial_password_page(csrf)
             message = ("Register access saved." if access_saved else "CSV schedule saved." if csv_saved else
                        "Retention settings saved." if saved else "")
-            return dashboard(csrf, message, camera_selection=camera, camera_saved=camera_saved)
+            refresh_notice = "Refresh schedule saved." if refresh_saved else ""
+            return dashboard(csrf, message, camera_selection=camera, camera_saved=camera_saved,
+                             refresh_notice=refresh_notice)
         return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
     @app.post("/admin/login")
@@ -900,6 +1125,63 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
             raise HTTPException(403, "Reload the Admin page before submitting.")
         return csrf, fields
+
+    @app.get("/admin/registered-vehicles/template.csv")
+    def registration_template(request: Request):
+        if not admin_csrf(request):
+            raise HTTPException(403, "Sign in as administrator.")
+        return Response("Plate\r\n", media_type="text/csv",
+                        headers={"Content-Disposition": 'attachment; filename="platelog-registered-plates.csv"'})
+
+    @app.post("/admin/registered-vehicles/{action}")
+    async def import_registrations(request: Request, action: str, mode: str, file_type: str = Query(alias="format")):
+        require_form_origin(request)
+        csrf = admin_csrf(request)
+        if not csrf:
+            raise HTTPException(403, "Sign in as administrator.")
+        if not hmac.compare_digest(csrf.encode(), request.headers.get("X-CSRF-Token", "").encode()):
+            raise HTTPException(403, "Reload the Admin page before submitting.")
+        if action not in {"preview", "apply"} or mode not in {"add", "replace"} or file_type not in {"csv", "xlsx"}:
+            raise HTTPException(400, "Choose a CSV or .xlsx file and a valid import mode.")
+        replacing = mode == "replace"
+        applying = action == "apply"
+        if applying and replacing and request.headers.get("X-Confirm-Replace") != "yes":
+            raise HTTPException(400, "Confirm that plates missing from the file will be removed.")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > IMPORT_BYTES:
+                raise HTTPException(413, "Plate lists can be up to 4 MiB. Save large workbooks as CSV.")
+            body.extend(chunk)
+
+        digest = hashlib.sha256(body).hexdigest()
+
+        def signature(revision: str) -> str:
+            message = f"{csrf}:{mode}:{file_type}:{digest}:{revision}".encode()
+            return hmac.digest(import_secret, message, "sha256").hex()
+
+        expected = None
+        if applying:
+            receipt = request.headers.get("X-Import-Receipt", "")
+            match = re.fullmatch(r"([a-f0-9]{32}|)\.([a-f0-9]{64})", receipt)
+            if not match or not hmac.compare_digest(signature(match[1]), match[2]):
+                raise HTTPException(409, "Preview this file and import mode before applying.")
+            expected = match[1]
+
+        def process_import():
+            plates, duplicates = parse_plates(bytes(body), file_type)
+            result = store.registration_import(plates, replacing, expected)
+            revision = result.pop("revision")
+            if not applying:
+                result["receipt"] = f"{revision}.{signature(revision)}"
+                result["duplicates"] = duplicates
+            return result
+
+        try:
+            return await run_in_threadpool(process_import)
+        except RegistrationChanged as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @app.post("/admin/register-access")
     async def save_register_access(request: Request):
@@ -953,6 +1235,19 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         activity = "Daily CSV schedule enabled" if enabled else "Daily CSV schedule disabled"
         await run_in_threadpool(store.set_setting, "daily_csv_schedule", schedule, activity)
         return RedirectResponse("/admin?csv_saved=true#csv-reports", status_code=303)
+
+    @app.post("/admin/registered-refresh")
+    async def save_registered_refresh(request: Request):
+        csrf, fields = await authorized_form(request, limit=16_384)
+        enabled = fields.get("enabled") == "yes"
+        source = fields.get("source", "").strip()
+        run_time = fields.get("run_time", "")
+        try:
+            await run_in_threadpool(save_refresh_schedule, store, enabled, source, run_time)
+        except ValueError as exc:
+            draft = {"enabled": enabled, "source": source, "run_time": run_time}
+            return dashboard(csrf, status=400, refresh_draft=draft, refresh_notice=str(exc))
+        return RedirectResponse("/admin?refresh_saved=true#registered-refresh", status_code=303)
 
     @app.post("/admin/purge")
     async def purge(request: Request):
@@ -1135,9 +1430,18 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                 LOG.exception("PlateLog daily CSV export failed")
             await asyncio.sleep(30)
 
+    async def supervise_registered_refresh():
+        while True:
+            try:
+                await run_in_threadpool(refresh_due_registrations, store, display_zone)
+            except Exception:
+                LOG.exception("PlateLog scheduled registered list refresh failed")
+            await asyncio.sleep(30)
+
     @asynccontextmanager
     async def lifespan(_app):
-        tasks = [asyncio.create_task(job()) for job in (supervise_retention, supervise_csv)] if persistent else []
+        jobs = (supervise_retention, supervise_csv, supervise_registered_refresh) if persistent else ()
+        tasks = [asyncio.create_task(job()) for job in jobs]
         try:
             yield
         finally:
@@ -1212,6 +1516,10 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         last_read = store.last_received_ms()
         return {"server_ms": time.time_ns() // 1_000_000, "last_read_ms": last_read, "zone": str(register_zone())}
 
+    @app.get("/register/stats", response_class=HTMLResponse, dependencies=signed_in)
+    def register_stats(camera: str = Query("", max_length=128)):
+        return render_stats(store, time.time_ns() // 1_000_000, camera, register_zone())
+
     @app.get("/", response_class=HTMLResponse, dependencies=signed_in)
     def register(request: Request, filters: Annotated[RegisterFilters, Depends(filters_for_request)], page: int = Query(1, ge=1)):
         options = ['<option value="">All cameras</option>']
@@ -1228,7 +1536,11 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         toggles = "".join(f'<label><input type="checkbox" id="show-{key}" data-column-toggle="{key}" checked> {key.title()}</label>'
                           for key in VEHICLE_COLUMNS)
         toolbar = f'<div class="toolbar">{controls}<fieldset><legend>Columns</legend>{toggles}</fieldset></div>'
-        return register_page(request, "Register", register_sign_out_form(request) + toolbar +
+        activity = render_stats(store, time.time_ns() // 1_000_000, filters.camera, filters.zone)
+        stats = f'''<section class="register-stats" aria-labelledby="stats-heading">
+            <h2 id="stats-heading">Vehicle activity · Last 24 hours</h2>
+            <div id="register-stats-content">{activity}</div></section>'''
+        return register_page(request, "Register", register_sign_out_form(request) + stats + toolbar +
                              '<p id="search-status" role="status"></p>' +
                              f'<div id="register-results">{render_results(filters, page)}</div>',
                              header_extra=clock_header(filters.zone))
@@ -1270,6 +1582,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         for row in rows:
             link = f"/passages/{row['id']}"
             plate_text = escape(row["plate"])
+            registered = "true" if row["registered"] else "false"
+            registration = "Registered" if row["registered"] else "Unregistered"
             photo_label = "Image expired" if row["photo_expired"] else "No image"
             photo = f'<span class="photo no-photo muted">{photo_label}</span>'
             if row["photo_id"]:
@@ -1280,7 +1594,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             time = capture.strftime("%H:%M:%S")
             cells = "".join(f'<td data-column="{key}">{escape(row[key]) if row[key] else "—"}</td>'
                             for key in VEHICLE_COLUMNS)
-            result.append(f'''<tr><td>{photo}</td><td class="registration"><a href="{link}">{plate_text}</a></td>
+            result.append(f'''<tr data-registered="{registered}"><td>{photo}</td>
+                <td class="registration"><a href="{link}">{plate_text}</a><span class="registration-status">{registration}</span></td>
                 <td>{date}</td><td><time datetime="{capture.isoformat()}" title="{capture.strftime('%Z %z')}">{time}</time></td>{cells}</tr>''')
         headings = "".join(f'<th scope="col" data-column="{key}">{key.title()}</th>' for key in VEHICLE_COLUMNS)
         return f'''<div data-register-page="{page}">{top}<p id="register-summary" class="muted">{caption}</p>

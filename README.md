@@ -71,6 +71,8 @@ Run `python -m platelog preview --timezone Australia/Sydney`, then open `http://
 
 The register shows 50 passages per page, newest first. Page 1 updates automatically every five seconds with the current filters. Use the page links to browse older results and **Return to live** to resume automatic updates. The header shows the server clock and when PlateLog last saved a camera read, across all cameras. The clock uses the register's display time zone and the read time updates even while browsing older pages.
 
+**Vehicle activity** updates every five seconds and shows the last 24 hours in 15-minute intervals. Total passes counts each passage. Unique plates and unregistered vehicles count distinct plate numbers. The busiest hour shows the highest number of passes in any 60-minute span in the window. The camera dropdown applies to the chart. The chart retains its 24-hour window while you search or browse older passages. Register rows show **Registered** in black or **Unregistered** in red, with a matching photo border. Both the rows and the activity summary use the current registered list.
+
 Set **From** and **To** to filter by the passage's first capture time in the displayed time zone. The selected **To** minute is included. Leave either bound blank to search without that limit. **Export Excel** downloads a summary with counts by camera and one row per matching passage across all pages, with a thumbnail before the registration. **Excel without photos** keeps the passage data and photo counts in a smaller workbook.
 
 PlateLog prepares one Excel export at a time. Each workbook can include up to 10,000 passages. Exports with photos also have a limit of 5,000 thumbnails and 32 MiB of combined thumbnails. If a selection exceeds a limit, narrow **From** and **To** or switch to **Excel without photos** when offered. PlateLog returns a message in place of a partial workbook.
@@ -119,6 +121,10 @@ docker run -d --name platelog --restart unless-stopped --pull=never \
 Sign in to **Admin** on TCP `8765` with the initial password `admin`, then set a new password to unlock settings. Register each camera before sending events to TCP `8766`. For scheduled CSV reports, `/data` is writable by default with this setup. An additional destination can be mounted when creating the container.
 
 ## Admin
+
+Under **Registered vehicles**, use **Download CSV template** for the required `Plate` heading. Upload a UTF-8 CSV or an `.xlsx` file with that heading on the first worksheet. Format the Excel column as Text before entering plates so leading zeros are preserved. **Preview import** shows additions, existing plates, duplicate rows, and any removals. Select **Add to existing list** to keep plates missing from the file, or **Replace entire list** to remove them. Apply the preview after reviewing the changes. Each file can contain up to 25,000 plate rows and be up to 4 MiB.
+
+Use **Scheduled list refresh** to replace the list daily from a CSV with the same heading. Set the refresh time in the register's time zone and enter the full source file path on the server or a Windows UNC share. Give the PlateLog service account read access and have the source system publish the finished CSV before the scheduled time, for example by writing a temporary file and renaming it when complete. PlateLog attempts the refresh once per day. It can catch up after a restart on the same day. If the file is missing, unreadable, empty, or invalid, PlateLog keeps the current list and shows the failure alongside the last successful refresh in Admin.
 
 Start the preview with a persistent directory:
 

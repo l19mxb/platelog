@@ -17,8 +17,10 @@ APP_FILES = (
     "examples/Send-AxisEvent.ps1",
     "deploy/windows/PlateLog.xml", "platelog/__init__.py", "platelog/__main__.py",
     "platelog/axis.py", "platelog/credentials.py", "platelog/daily_csv.py", "platelog/preview.py", "platelog/receiver.py",
-    "platelog/simulator.py", "platelog/store.py", "platelog/fixtures/entry.jpg",
-    "platelog/fixtures/exit.jpg", "tests/test_receiver.py",
+    "platelog/register_stats.py", "platelog/registered_refresh.py", "platelog/simulator.py", "platelog/store.py",
+    "platelog/vehicle_import.py",
+    "platelog/fixtures/entry.jpg", "platelog/fixtures/exit.jpg",
+    "tests/test_receiver.py", "tests/test_registered_vehicles.py",
 )
 VENDOR_FILES = (
     ("python-3.13.17-amd64.exe", "Python", "3.13.17",

@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS admin_audit (
     activity TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCES passages(id));
+CREATE TABLE IF NOT EXISTS registered_plates (plate_key TEXT PRIMARY KEY, plate TEXT NOT NULL);
 COMMIT;
 """
 
@@ -112,6 +113,10 @@ def vehicle_details(packets: list[sqlite3.Row]) -> dict[str, str | None]:
         if all(details.values()):
             break
     return details
+
+
+class RegistrationChanged(ValueError):
+    """The registered list changed after the import preview."""
 
 
 class Store:
@@ -217,6 +222,100 @@ class Store:
     def passage_cameras(self) -> set[str]:
         with closing(self.connect()) as db:
             return {row[0] for row in db.execute("SELECT DISTINCT camera FROM passages")}
+
+    def registered_count(self) -> int:
+        with closing(self.connect()) as db:
+            return db.execute("SELECT count(*) FROM registered_plates").fetchone()[0]
+
+    def registration_import(self, plates: dict[str, str], replace: bool,
+                            expected_revision: str | None = None) -> dict:
+        """Preview changes or apply them atomically against the reviewed revision."""
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN" if expected_revision is None else "BEGIN IMMEDIATE")
+            applying = expected_revision is not None
+            result = self._registration_changes(db, plates, replace, apply=applying, expected_revision=expected_revision)
+            if applying and (result["added"] or result["removed"]):
+                mode = "replaced" if replace else "imported"
+                self._audit(db, f"Registered list {mode}: {result['added']} added, {result['removed']} removed")
+            return result
+
+    def _registration_changes(self, db: sqlite3.Connection, plates: dict[str, str], replace: bool,
+                              *, apply: bool, expected_revision: str | None = None) -> dict:
+        saved = db.execute("SELECT value FROM settings WHERE name='registered_plates_revision'").fetchone()
+        revision = saved[0] if saved else ""
+        if expected_revision is not None and expected_revision != revision:
+            raise RegistrationChanged("The registered list changed. Preview the file again before importing.")
+
+        current = dict(db.execute("SELECT plate_key, plate FROM registered_plates"))
+        added = plates.keys() - current.keys()
+        removed = current.keys() - plates.keys() if replace else set()
+        total = len(current) + len(added) - len(removed)
+        if total > 50_000:
+            raise ValueError("The registered list can hold up to 50,000 plates.")
+        if apply and (added or removed):
+            db.executemany("DELETE FROM registered_plates WHERE plate_key=?", ((key,) for key in removed))
+            db.executemany("INSERT INTO registered_plates VALUES (?,?)", ((key, plates[key]) for key in added))
+            db.execute("""INSERT INTO settings VALUES ('registered_plates_revision',?)
+                          ON CONFLICT(name) DO UPDATE SET value=excluded.value""", (uuid4().hex,))
+        return {"revision": revision, "total": total, "added": len(added), "removed": len(removed),
+                "existing": len(plates) - len(added),
+                "sample": [{"plate": plates[key], "action": "Add" if key in added else "Keep"}
+                           for key in list(plates)[:20]],
+                "removed_sample": [current[key] for key in sorted(removed)[:20]]}
+
+    def save_registered_refresh_schedule(self, config: dict, configured_at: str) -> None:
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value FROM settings WHERE name='registered_refresh_schedule'").fetchone()
+            if row:
+                current = json.loads(row[0])
+                if all(current[key] == value for key, value in config.items()):
+                    return
+            schedule = json.dumps({**config, "revision": uuid4().hex, "configured_at": configured_at})
+            db.execute("""INSERT INTO settings VALUES ('registered_refresh_schedule',?)
+                          ON CONFLICT(name) DO UPDATE SET value=excluded.value""", (schedule,))
+            activity = "Scheduled registered list refresh enabled" if config["enabled"] else "Scheduled registered list refresh disabled"
+            self._audit(db, activity)
+
+    def finish_registered_refresh(self, revision: str, day: str, attempted_at: str,
+                                  plates: dict[str, str] | None, error: str = "") -> None:
+        """Commit the replacement and its status together if the schedule is still current."""
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            schedule = db.execute("SELECT value FROM settings WHERE name='registered_refresh_schedule'").fetchone()
+            if not schedule or json.loads(schedule[0])["revision"] != revision:
+                return
+            saved = db.execute("SELECT value FROM settings WHERE name='registered_refresh_status'").fetchone()
+            status = json.loads(saved[0]) if saved else {}
+            attempt = status.get("last_attempt", {})
+            if attempt.get("revision") == revision and attempt.get("day", "") >= day:
+                return
+            latest = {"revision": revision, "day": day, "attempted_at": attempted_at, "error": error}
+            if plates:
+                result = self._registration_changes(db, plates, True, apply=True)
+                latest.update({key: result[key] for key in ("added", "removed", "total")})
+                status["last_success"] = latest
+                activity = f"Scheduled registered list refreshed: {result['added']} added, {result['removed']} removed"
+            else:
+                activity = f"Scheduled registered list refresh failed: {error}"
+            status["last_attempt"] = latest
+            db.execute("""INSERT INTO settings VALUES ('registered_refresh_status',?)
+                          ON CONFLICT(name) DO UPDATE SET value=excluded.value""", (json.dumps(status),))
+            self._audit(db, activity)
+
+    def passage_activity(self, start_ms: int, end_ms: int, camera: str) -> list[sqlite3.Row]:
+        """Read one effective plate per passage from the same snapshot as its list match."""
+        with closing(self.connect()) as db:
+            return db.execute(f"""
+                SELECT p.first_ms, latest.plate_key, r.plate_key IS NOT NULL AS registered
+                FROM passages p
+                JOIN packets latest ON latest.rowid=(
+                    SELECT rowid FROM packets WHERE passage_id=p.id ORDER BY {PACKET_ORDER} LIMIT 1
+                )
+                LEFT JOIN registered_plates r ON r.plate_key=latest.plate_key
+                WHERE p.first_ms>=? AND p.first_ms<? AND (?='' OR p.camera=?)
+                ORDER BY p.first_ms, p.id
+            """, (start_ms, end_ms, camera, camera)).fetchall()
 
     def admin_overview(self) -> tuple[dict, list[sqlite3.Row]]:
         with closing(self.connect()) as db:
@@ -394,7 +493,15 @@ class Store:
             total = db.execute(f"SELECT COUNT(*) {PASSAGE_MATCH}", args).fetchone()[0]
             last = max(1, (total + size - 1) // size)
             page = min(page, last)
-            return self._matching_passages(db, args, size, (page - 1) * size), total, page
+            rows = self._matching_passages(db, args, size, (page - 1) * size)
+            if rows:
+                keys = [plate_key(row["plate"]) for row in rows]
+                placeholders = ",".join("?" for _ in keys)
+                registered = {row[0] for row in db.execute(
+                    f"SELECT plate_key FROM registered_plates WHERE plate_key IN ({placeholders})", keys)}
+                for row, key in zip(rows, keys):
+                    row["registered"] = key in registered
+            return rows, total, page
 
     def export_passages(self, plate: str, camera: str, limit: int, *,
                         start_ms: int | None = None, end_ms: int | None = None) -> list[dict] | None:
