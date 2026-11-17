@@ -1,4 +1,6 @@
-# PlateLog offline Windows Server preview
+# Legacy PlateLog Windows preview installer
+
+This WinSW bundle runs a synthetic preview over HTTP. For a workplace deployment, follow the [offline Windows Server pilot](../../README.md#offline-windows-server-pilot).
 
 The x64 ZIP includes a signed Python 3.13.17 offline installer, WinSW 2.12.0 for .NET Framework, the application and the full wheelhouse. PlateLog stores its SQLite database and synthetic JPEGs on the server. It needs no Internet access, Docker, database service or Axis camera. The server needs Windows PowerShell 5.1 or newer and .NET Framework 4.x. [Python release](https://www.python.org/downloads/release/python-31317/) · [WinSW release](https://github.com/winsw/winsw/releases/tag/v2.12.0) · [.NET Framework on Windows Server](https://learn.microsoft.com/en-us/dotnet/framework/get-started/system-requirements)
 

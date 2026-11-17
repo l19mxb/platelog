@@ -1,6 +1,37 @@
 # PlateLog
 
-PlateLog is a prototype for a local Axis licence plate register. The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings. A persistent instance can receive Axis HTTP POST events into the same register. The [v1 specification](technical-spec.md) describes the wider pilot.
+PlateLog is a prototype for a local Axis licence plate register. A persistent instance receives Axis HTTP POST events and provides live plate search, vehicle photos, Excel exports and scheduled CSV reports. The [v1 specification](technical-spec.md) describes the wider pilot.
+
+## Offline Windows Server pilot
+
+The native Python pilot serves the staff register and Admin over **HTTPS on TCP 443** by default. The offline VM test ran on Windows Server 2025 with **CPython 3.15.2 x64** and **SQLite 3.53.4**. Check the SQLite version bundled with the approved interpreter and validate the intended ZIP before accepting live data. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
+
+1. Transfer the reviewed ZIP and its SHA-256 through the site's approved process. The pilot ZIP contains readable Python source, a local wheelhouse and hash-locked requirements. Verify the ZIP checksum and use its `START-HERE.md` to install the wheels offline with the approved Python in a virtual environment.
+2. Give the server an internal DNS name and obtain a Server Authentication certificate with that name in the Subject Alternative Name. Prepare `server.pem` with the server certificate followed by any required intermediates. Restrict access to the matching `server-key.pem` to the runtime account and authorised administrators. Distribute approved public trust material through the site's managed process. [Microsoft certificate deployment](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/distribute-certificates-group-policy)
+3. From the source folder, use the Python interpreter in the prepared virtual environment to set the administrator password and start the pilot. Substitute the site's DNS name and certificate paths.
+
+   ```powershell
+   python -E -s -B -m platelog admin-password --data-dir C:\ProgramData\PlateLog\data
+   python -E -s -B -m platelog pilot --data-dir C:\ProgramData\PlateLog\data `
+       --allowed-host platelog.example.internal --port 443 --tls-cert C:\PlateLog\tls\server.pem `
+       --tls-key C:\PlateLog\tls\server-key.pem
+   ```
+
+4. Allow staff TCP 443 from approved networks. Use `--port` for an approved alternate port. Open the internal HTTPS address from a managed staff PC and confirm it loads with normal certificate validation. A fresh pilot requires staff sign-in. Set the staff password in **Admin → Register access**. After validating the site, stop the interactive process and use the approved Windows process supervisor with the same launch arguments.
+5. The camera listener starts off. When ready for a controlled camera test, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and configure it to POST to `https://<name>:8766/api/axis/<id>/events`. Verify TLS trust and send a controlled pass from the actual camera.
+
+### Workstation certificate trust
+
+For a standalone Windows workstation where IT approves a manual import, run the example below from the repository root. Use the public DER `.cer` file and SHA-256 fingerprint supplied through a trusted IT channel. The script verifies the fingerprint and adds the certificate to the current user's trust store. Add `-WhatIf` to preview the import. Use central certificate deployment for managed staff PCs. [Windows certificate stores](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/inspect-certificates-manage-certificate-stores)
+
+```powershell
+.\examples\Trust-PlateLogCertificate.ps1 `
+    -CertificatePath 'C:\IT\platelog-ca.cer' -ExpectedSha256 '<64-character SHA-256 from IT>'
+```
+
+## Quick start
+
+The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings.
 
 ![PlateLog register with a 24-hour line graph, total vehicle passes, unregistered vehicles, and a synthetic L19MXB passage](docs/images/register.png)
 
@@ -11,8 +42,6 @@ Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
 One of the simulated camera captures features `L19MXB`, a nod to PlateLog’s creator.
 
 ![Simulated camera capture of a black 2023 Subaru WRX Sportswagon with the L19MXB number plate](docs/images/demo-l19mxb.jpg)
-
-## Quick start
 
 With Python 3.12 or 3.13 installed, run the following from the repository root, then open `http://127.0.0.1:8765/`:
 
@@ -146,7 +175,7 @@ python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney
 
 When no administrator password has been set, sign in with `admin`, enter a new password of at least 14 characters, then sign in with the new password. The initial sign-in only opens the password change form. To set your own password before opening the listener, run `python -m platelog admin-password --data-dir .platelog-data` first.
 
-The register opens without sign-in by default. To require sign-in, sign in to **Admin**, set a separate staff password under **Register access**, and enable **Require staff sign-in to view the register**. Staff can use the register, search, passage details, photos and Excel exports. Only the administrator password opens both the register and **Admin**, including camera settings, retention, scheduled reports and service controls. Changing register access or rotating the staff password ends staff sessions. Upgrading removes any previously enabled staff access to Admin.
+The preview register opens without sign-in by default. To require sign-in, sign in to **Admin**, set a separate staff password under **Register access**, and enable **Require staff sign-in to view the register**. Staff can use the register, search, passage details, photos and Excel exports. Only the administrator password opens both the register and **Admin**, including camera settings, retention, scheduled reports and service controls. Changing register access or rotating the staff password ends staff sessions. Upgrading removes any previously enabled staff access to Admin.
 
 Under **Retention**, new installations start with automatic cleanup enabled and keep passages for 360 days and photos for 90 days. Existing installations keep their current cleanup setting, including the previous off default if nobody saved a preference. Cleanup runs at startup and hourly while enabled. **Purge now** asks for confirmation and applies the saved limits immediately, even when automatic cleanup is off. Purging a passage removes all of its event packets and photos. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label. **Storage** shows passage, event and photo counts, and **Recent admin activity** records purges and settings changes.
 
@@ -156,43 +185,15 @@ Under **Daily CSV report**, enable the schedule, choose a time such as `00:05`, 
 
 For a remote Windows share, use a UNC folder such as `\\fileserver\reports\PlateLog`. In Docker, mount the destination into the container and enter its path inside the container. [Microsoft guidance on services and redirected drives](https://learn.microsoft.com/en-us/windows/win32/services/services-and-redirected-drives)
 
-Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
+Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. In a persistent preview, **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
 
-**Admin → Display** changes the time zone used for the register, date and time filters, and Excel reports. On native installs with `--manage-web-port`, **Admin → Service** sets the staff web port and **Admin → Axis cameras** sets the dedicated camera POST port. They default to `8765` and `8766`. Allow a new TCP port in the firewall before applying it. Saving either port restarts PlateLog. When the camera port changes, update the POST destinations on the cameras. The staff web port passed at launch is the fallback if the saved staff port is occupied at startup. If the camera port is unavailable, the register and Admin can still start.
+**Admin → Display** changes the time zone used for the register, date and time filters, and Excel reports. In a preview started with `--manage-web-port`, **Admin → Service** sets the staff web port and **Admin → Axis cameras** sets the dedicated camera POST port. They default to `8765` and `8766`. Allow a new TCP port in the firewall before applying it. Saving either port restarts PlateLog. When the camera port changes, update the POST destinations on the cameras. The staff web port passed at launch is the fallback if the saved staff port is occupied at startup. If the camera port is unavailable, the register and Admin can still start.
 
-Admin and staff sign-in work over HTTP once their passwords are configured. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries passwords and session cookies in clear text. To require HTTPS for both sign-ins, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command resets the administrator password and invalidates administrator sessions.
-
-For a native Windows Server preview with no Internet access, see the [offline bundle and Windows service setup](deploy/windows/README.md).
-
-## Run the HTTPS pilot from Python source
-
-Use the `pilot` command for a persistent register over HTTPS. On Windows, the tested offline runtime is CPython 3.15.2 x64 with SQLite 3.53.4. Check the SQLite version bundled with the interpreter before accepting live data. Install the pinned dependencies in a virtual environment. For offline use, transfer the source, a reviewed wheelhouse for the target Python and Windows architecture, and its hash-locked requirements. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
-
-1. Give the server an internal DNS name and create its DNS record. Obtain a Server Authentication certificate with that DNS name in its Subject Alternative Name from a CA approved by the site. Prepare `server.pem` with the leaf followed by any required intermediates and keep the matching `server-key.pem` readable by the runtime account. Distribute the public CA certificate through the site's managed trust process if workstations do not already trust it. [Microsoft certificate deployment](https://learn.microsoft.com/en-us/windows-server/identity/ad-fs/deployment/distribute-certificates-group-policy)
-2. Set the pilot Administrator password and start PlateLog from the source folder. Use your approved DNS name, certificate paths, and data folder in place of the examples.
-
-   ```powershell
-   python -E -s -B -m platelog admin-password --data-dir C:\ProgramData\PlateLog\data
-   python -E -s -B -m platelog pilot --data-dir C:\ProgramData\PlateLog\data `
-       --allowed-host platelog.example.internal --tls-cert C:\PlateLog\tls\server.pem `
-       --tls-key C:\PlateLog\tls\server-key.pem
-   ```
-
-3. Allow staff HTTPS from approved networks on TCP 443. Change the port with `--port` if needed. On a fresh pilot register, staff sign-in starts required. Open `/admin` over HTTPS and set a staff password in **Register access**. Use your approved Windows process supervisor to start the pilot with the same arguments and runtime identity.
-4. When ready for camera inputs, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and point it to `https://<name>:8766/api/axis/<id>/events`. Confirm certificate trust and run a controlled test on the real camera.
-
-For a standalone Windows workstation where IT approves a manual import, use the public DER `.cer` file and SHA-256 fingerprint supplied through a trusted IT channel. The script checks the exact certificate and adds it to the current user's trust store. Add `-WhatIf` to preview the import. For managed staff PCs use the site's central certificate deployment. [Windows certificate stores](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/inspect-certificates-manage-certificate-stores)
-
-```powershell
-.\examples\Trust-PlateLogCertificate.ps1 `
-    -CertificatePath 'C:\IT\platelog-ca.cer' -ExpectedSha256 '<64-character SHA-256 from IT>'
-```
-
-Open `https://<name>/` on a staff workstation and check that the browser loads the sign-in page with normal certificate validation.
+In the preview, Admin and staff sign-in work over HTTP once their passwords are configured. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries passwords and session cookies in clear text. To require HTTPS for both sign-ins, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command resets the administrator password and invalidates administrator sessions.
 
 ### Configure Axis HTTP POST
 
-Use a persistent `--data-dir` to enable the camera listener. Starting with `--no-demo` and a fresh data directory gives you an empty register for a trial. In **Admin → Axis cameras**, add a camera ID such as `entry`. Select **HTTP Basic** and set a username and password, or select **No credentials** for a network where IT restricts access to the camera. Camera POSTs are accepted once a camera is configured and enabled. Camera settings apply when saved.
+These steps apply to the preview. The [offline Windows Server pilot](#offline-windows-server-pilot) has a dedicated HTTPS camera setup above. Use a persistent `--data-dir` to enable the preview camera listener. Starting with `--no-demo` and a fresh data directory gives you an empty register. In **Admin → Axis cameras**, add a camera ID such as `entry`. Select **HTTP Basic** and set a username and password, or select **No credentials** for a network where IT restricts access to the camera. Camera POSTs are accepted once a camera is configured and enabled. Camera settings apply when saved.
 
 In AXIS License Plate Verifier, open **Integration → Push events**, select **HTTP POST**, and enter the camera listener address and path. For `entry` on the default port, use `http://SERVER-NAME:8766/api/axis/entry/events`. If you selected Basic, enter the same username and password on the camera. Use the camera's **Test** button and check that the test plate appears on the register. PlateLog accepts JSON and multipart from configured cameras. Verify the target firmware with a controlled pass before accepting a live deployment. [Axis push event setup](https://help.axis.com/en-us/axis-license-plate-verifier#push-event-information-to-third-party-software) · [Axis push event API](https://developer.axis.com/vapix/applications/license-plate-verifier-api/#push-events)
 
@@ -205,6 +206,10 @@ To test a configured receiver from PowerShell, send the `L19MXB` demo as an Axis
 For HTTP Basic, append `-Credential (Get-Credential)` and enter the camera credential from **Admin → Axis cameras**. To replay a captured request body byte for byte, add `-CapturePath .\axis-capture.json`. For a raw multipart capture, pass its original `-ContentType` including the boundary.
 
 For a persistent Docker instance, publish the staff and camera ports separately, for example `-p 8765:8765 -p 8766:8766`. To use a different camera port on the host, change the first number in the camera mapping. Keep `--manage-web-port` off in Docker so its internal ports stay aligned with the published mappings.
+
+## Legacy Windows preview installer
+
+The [legacy WinSW installer](deploy/windows/README.md) uses Python 3.13.17 and serves a synthetic register over HTTP on TCP 8765. For the workplace setup, follow the [offline Windows Server pilot](#offline-windows-server-pilot).
 
 ## Suggested workplace trial
 
