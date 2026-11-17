@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
+from .alarms import MAX_LIVE_AGE_MS, MAX_LIVE_FUTURE_MS, SETTLE_MS, AlarmRule
 from .axis import Event, plate_key
 
 TRACK_WINDOW_MS = 60_000
@@ -74,6 +75,29 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 );
 CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCES passages(id));
 CREATE TABLE IF NOT EXISTS registered_plates (plate_key TEXT PRIMARY KEY, plate TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alarm_rules (
+    camera TEXT PRIMARY KEY REFERENCES camera_settings(id),
+    mode TEXT NOT NULL CHECK (mode IN ('off', 'log', 'live')),
+    plate_status TEXT NOT NULL CHECK (plate_status IN ('registered', 'unregistered')),
+    module TEXT NOT NULL,
+    virtual_input INTEGER NOT NULL,
+    pulse_seconds INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    secret_name TEXT NOT NULL,
+    revision TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS alarm_runs (
+    passage_id TEXT PRIMARY KEY REFERENCES passages(id) ON DELETE CASCADE,
+    camera TEXT NOT NULL REFERENCES alarm_rules(camera),
+    revision TEXT NOT NULL,
+    due_ms INTEGER NOT NULL,
+    plate TEXT NOT NULL,
+    result TEXT NOT NULL DEFAULT 'pending',
+    result_ms INTEGER,
+    detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS alarm_pending ON alarm_runs(due_ms) WHERE result='pending';
+CREATE INDEX IF NOT EXISTS alarm_activity ON alarm_runs(result_ms DESC) WHERE result_ms IS NOT NULL;
 COMMIT;
 """
 
@@ -124,9 +148,21 @@ class Store:
         self.images = directory / "images"
         self.images.mkdir(parents=True, exist_ok=True)
         self.database = directory / "platelog.sqlite3"
-        with closing(self.connect()) as db:
+        with closing(self.connect()) as db, db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(SCHEMA)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {column["name"] for column in db.execute("PRAGMA table_info(alarm_rules)")}
+            if "plate_status" not in columns:
+                db.execute("""ALTER TABLE alarm_rules ADD COLUMN plate_status TEXT NOT NULL DEFAULT 'unregistered'
+                              CHECK (plate_status IN ('registered', 'unregistered'))""")
+            if "username" not in columns:
+                db.execute("ALTER TABLE alarm_rules ADD COLUMN username TEXT NOT NULL DEFAULT ''")
+                db.execute("ALTER TABLE alarm_rules ADD COLUMN secret_name TEXT NOT NULL DEFAULT ''")
+                if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='alarm_devices'").fetchone():
+                    db.execute("""UPDATE alarm_rules AS r SET (username, secret_name)=(
+                                     SELECT d.username,d.secret_name FROM alarm_devices d WHERE d.module=r.module)
+                                  WHERE EXISTS (SELECT 1 FROM alarm_devices d WHERE d.module=r.module)""")
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database, timeout=5)
@@ -222,6 +258,82 @@ class Store:
     def passage_cameras(self) -> set[str]:
         with closing(self.connect()) as db:
             return {row[0] for row in db.execute("SELECT DISTINCT camera FROM passages")}
+
+    def alarm_overview(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
+        with closing(self.connect()) as db:
+            rules = db.execute("SELECT * FROM alarm_rules ORDER BY camera").fetchall()
+            recent = db.execute("""SELECT passage_id, camera, plate, result, result_ms, detail FROM alarm_runs
+                                 WHERE result_ms IS NOT NULL ORDER BY result_ms DESC, rowid DESC LIMIT 12""").fetchall()
+        return rules, recent
+
+    def save_alarm_rule(self, camera: str, rule: AlarmRule) -> None:
+        values = (rule.mode, rule.trigger, rule.module, rule.virtual_input, rule.pulse_seconds,
+                  rule.username, rule.secret_name)
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM camera_settings WHERE id=?", (camera,)).fetchone():
+                raise ValueError("Choose a configured Axis source camera.")
+            if rule.mode == "live" and not (rule.module and rule.username and os.environ.get(rule.secret_name)):
+                raise ValueError("Live mode needs a timed HTTPS command, an Axis username, and a password variable set for the PlateLog service.")
+            current = db.execute("""SELECT mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name
+                                  FROM alarm_rules WHERE camera=?""", (camera,)).fetchone()
+            if current is not None and tuple(current) == values:
+                return
+            db.execute("""INSERT INTO alarm_rules
+                          (camera, mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name, revision)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ON CONFLICT(camera) DO UPDATE SET mode=excluded.mode, plate_status=excluded.plate_status, module=excluded.module,
+                          virtual_input=excluded.virtual_input, pulse_seconds=excluded.pulse_seconds,
+                          username=excluded.username, secret_name=excluded.secret_name,
+                          revision=excluded.revision""",
+                       (camera, *values, uuid4().hex))
+            db.execute("""UPDATE alarm_runs SET result='held', result_ms=?, detail='Alarm rule changed.'
+                          WHERE camera=? AND result='pending'""", (time.time_ns() // 1_000_000, camera))
+            self._audit(db, f"Alarm rule for {camera} saved ({rule.mode})")
+
+    def claim_alarm(self, now_ms: int) -> dict | None:
+        due = "result='pending' AND due_ms<=?"
+        with closing(self.connect()) as db, db:
+            if not db.execute(f"SELECT 1 FROM alarm_runs WHERE {due} LIMIT 1", (now_ms,)).fetchone():
+                return None
+            db.execute("BEGIN IMMEDIATE")
+            run = db.execute(f"""SELECT a.*, r.mode, r.plate_status, r.module, r.virtual_input, r.pulse_seconds, r.username, r.secret_name,
+                                     r.revision AS rule_revision, c.mode AS source_mode, p.review
+                                  FROM (SELECT * FROM alarm_runs WHERE {due} ORDER BY due_ms, rowid LIMIT 1) a
+                                  JOIN alarm_rules r ON r.camera=a.camera JOIN camera_settings c ON c.id=a.camera
+                                  JOIN passages p ON p.id=a.passage_id""", (now_ms,)).fetchone()
+            if run is None:
+                return None
+            latest = db.execute(f"""SELECT plate, capture_ms, EXISTS (
+                                        SELECT 1 FROM registered_plates r WHERE r.plate_key=p.plate_key
+                                    ) AS registered FROM packets p WHERE passage_id=?
+                                    ORDER BY {PACKET_ORDER} LIMIT 1""", (run["passage_id"],)).fetchone()
+            if run["revision"] != run["rule_revision"] or run["mode"] == "off" or run["source_mode"] == "disabled":
+                result, detail = "held", "Alarm rule or source camera is disabled or changed."
+            elif not db.execute("SELECT 1 FROM registered_plates LIMIT 1").fetchone():
+                result, detail = "held", "Load a registered vehicle list before evaluating alarms."
+            elif run["review"]:
+                result, detail = "held", "The camera packets could not be matched to one passage."
+            elif bool(latest["registered"]) != (run["plate_status"] == "registered"):
+                result, detail = ("registered", "Plate matches the registered list.") if latest["registered"] else (
+                    "unregistered", "Plate is absent from the registered list.")
+            elif run["mode"] == "log":
+                result = "logged"
+                detail = f'{run["plate_status"].capitalize()} plate matched. A pulse would be requested in Live mode.'
+            elif not (run["username"] and run["secret_name"]):
+                result, detail = "held", "Set the Axis username and password variable for this rule."
+            elif not -MAX_LIVE_FUTURE_MS <= now_ms - latest["capture_ms"] <= MAX_LIVE_AGE_MS:
+                result, detail = "held", "The plate capture is outside the live alarm window."
+            else:
+                result, detail = "dispatching", "A VAPIX request was claimed. Axis has yet to confirm it."
+            db.execute("UPDATE alarm_runs SET plate=?, result=?, result_ms=?, detail=? WHERE passage_id=?",
+                       (latest["plate"], result, now_ms, detail, run["passage_id"]))
+            return {**dict(run), "result": result}
+
+    def finish_alarm(self, passage: str, result: str, detail: str) -> None:
+        with closing(self.connect()) as db, db:
+            db.execute("""UPDATE alarm_runs SET result=?, detail=?
+                          WHERE passage_id=? AND result='dispatching'""", (result, detail, passage))
 
     def registered_count(self) -> int:
         with closing(self.connect()) as db:
@@ -355,7 +467,7 @@ class Store:
         self.reconcile()
         return passages, photos
 
-    def _passage(self, db: sqlite3.Connection, camera: str, event: Event) -> str:
+    def _passage(self, db: sqlite3.Connection, camera: str, event: Event) -> tuple[str, bool]:
         matches = []
         if event.runtime_id:
             candidates = db.execute(
@@ -387,7 +499,7 @@ class Store:
                     matches.append(row["id"])
 
         if len(matches) == 1:
-            return matches[0]
+            return matches[0], False
         passage = uuid4().hex
         db.execute(
             """INSERT INTO passages(id,camera,profile,area,runtime_id,first_ms,last_ms,review)
@@ -395,7 +507,7 @@ class Store:
             (passage, camera, event.profile, event.area, event.runtime_id, event.capture_ms,
              event.capture_ms, int(len(matches) > 1)),
         )
-        return passage
+        return passage, True
 
     def save(self, camera: str, event: Event) -> dict:
         try:
@@ -407,12 +519,13 @@ class Store:
                 ).fetchone()
                 if found:
                     return {"packet_id": found["id"], "passage_id": found["passage_id"], "duplicate": True}
-                passage = self._passage(db, camera, event)
+                passage, new_passage = self._passage(db, camera, event)
                 packet = uuid4().hex
+                received_ms = time.time_ns() // 1_000_000
                 db.execute(
                     """INSERT INTO packets VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (packet, passage, camera, event.fingerprint, event.capture_ms,
-                     time.time_ns() // 1_000_000, event.counter, event.plate, plate_key(event.plate),
+                    (packet, passage, camera, event.fingerprint, event.capture_ms, received_ms,
+                     event.counter, event.plate, plate_key(event.plate),
                      event.direction, event.state, event.metadata),
                 )
                 for position, data in enumerate(event.images):
@@ -437,6 +550,14 @@ class Store:
                     (event.capture_ms, event.capture_ms, int(event.state == "new"),
                      int(event.state == "lost"), event.counter if event.state == "lost" else None, passage),
                 )
+                due_ms = received_ms + SETTLE_MS
+                if new_passage:
+                    db.execute("""INSERT INTO alarm_runs (passage_id, camera, revision, due_ms, plate)
+                                  SELECT ?, camera, revision, ?, ? FROM alarm_rules WHERE camera=? AND mode!='off'""",
+                               (passage, due_ms, event.plate, camera))
+                else:
+                    db.execute("UPDATE alarm_runs SET due_ms=? WHERE passage_id=? AND result='pending'",
+                               (due_ms, passage))
             return {"packet_id": packet, "passage_id": passage, "duplicate": False}
         except (OSError, sqlite3.Error):
             # Reconciliation takes a writer lock and checks committed references before deleting.

@@ -126,6 +126,18 @@ Under **Registered vehicles**, use **Download CSV template** for the required `P
 
 Use **Scheduled list refresh** to replace the list daily from a CSV with the same heading. Set the refresh time in the register's time zone and enter the full source file path on the server or a Windows UNC share. Give the PlateLog service account read access and have the source system publish the finished CSV before the scheduled time, for example by writing a temporary file and renaming it when complete. PlateLog attempts the refresh once per day. It can catch up after a restart on the same day. If the file is missing, unreadable, empty, or invalid, PlateLog keeps the current list and shows the failure alongside the last successful refresh in Admin.
 
+### VAPIX alarm rules
+
+In **Admin → Alarm rules**, select a source camera, choose **Registered** or **Unregistered**, and paste the timed HTTPS virtual-input URL for the destination device. Use one rule per source camera. The destination can be an Axis camera, relay module, or other device that supports timed virtual inputs. Map the virtual input to an action on that device. This example activates virtual input 2 for one second on an A9210 that drives a relay. [Axis event rules](https://help.axis.com/en-us/get-started-with-rules-for-events) · [VAPIX virtual inputs](https://developer.axis.com/vapix/network-video/input-and-outputs/#virtual-input-api)
+
+```text
+https://a9210.example.internal/axis-cgi/virtualinput/activate.cgi?schemaversion=1&port=2&duration=1
+```
+
+Start in **Log only**. Check **Recent alarm activity** with a registered pass, an unregistered pass and a replay. PlateLog waits two seconds after the latest packet and holds pulses when the list is empty or the passage is ambiguous.
+
+For **Live**, enter that device's Axis Operator username and a password variable such as `PLATELOG_AXIS_RELAY_PASSWORD_ENTRY` in the same row. Supply the password to the PlateLog service through that variable. Use the hostname or IPv4 address from the device's trusted certificate and include the HTTPS port if it differs from 443. Pulses must last 1–30 seconds. Live alarms use captures at most one minute old, with five seconds of tolerance for a camera ahead. PlateLog sends one request per qualifying passage. Check **Axis accepted** against the device's configured action during commissioning. An uncertain delivery is recorded as **Unconfirmed** and receives no automatic retry. [Axis authentication](https://developer.axis.com/vapix/authentication/)
+
 Start the preview with a persistent directory:
 
 ```sh

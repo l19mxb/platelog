@@ -29,6 +29,8 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .alarm_admin import alarm_activity, alarm_table
+from .alarms import SECRET_PREFIX, parse_rule, run_due_alarms
 from .credentials import (
     INITIAL_ADMIN_PREFIX,
     MIN_PASSWORD_LENGTH,
@@ -64,6 +66,14 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .admin dl { display: grid; grid-template-columns: max-content auto; gap: 4px 18px; }
 .admin dd { margin: 0; } .admin ul { padding-inline-start: 1.4rem; }
 .admin .notice { border-inline-start: 4px solid #194b79; padding-inline-start: 10px; }
+.alarm-admin { max-width: 70rem; }
+.alarm-admin .alarm-rule-form { display: block; }
+.alarm-rule-form textarea { box-sizing: border-box; width: 100%; min-width: 20rem; padding: 6px 8px;
+    border: 1px solid #8190a0; border-radius: 5px; font: inherit; resize: vertical; overflow-wrap: anywhere; }
+.alarm-rule-form code { overflow-wrap: anywhere; }
+.alarm-credentials { display: grid; gap: 4px; min-width: 13rem; }
+.alarm-credentials input { box-sizing: border-box; width: 100%; }
+.alarm-actions { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
 .camera-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .camera-heading h3, .camera-editor h4 { margin: 0; }
 .camera-add { padding: 5px 10px; border-radius: 5px; background: #194b79; color: white; text-decoration: none; }
@@ -632,7 +642,7 @@ def timestamp(value: int) -> str:
 
 
 def page(title: str, content: str, *, show_admin: bool = True, header_extra: str = "") -> str:
-    tab = "admin" if title == "Admin" else "register"
+    tab = "admin" if title in {"Admin", "Alarm rules"} else "register"
     register_current = ' aria-current="page"' if tab == "register" else ""
     admin_current = ' aria-current="page"' if tab == "admin" else ""
     admin_link = f'<a href="/admin"{admin_current}>Admin</a>' if show_admin else ""
@@ -1042,7 +1052,8 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <label>New staff password <input type="password" name="password" minlength="14" autocomplete="new-password"></label>
             <button type="submit">Save register access</button></form>
             <p>{password_note} The staff password opens the register. The administrator password opens both the register and Admin.</p></section>'''
-        return show(f'''<p class="notice" role="status">{escape(message)}</p>{access_form}{restart_form}
+        return show(f'''<p><a href="/admin/alarms">Alarm rules</a></p>
+            <p class="notice" role="status">{escape(message)}</p>{access_form}{restart_form}
             <section><h3>Display</h3><form method="post" action="/admin/timezone">
             <input type="hidden" name="csrf" value="{csrf}">
             <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
@@ -1123,6 +1134,45 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
             raise HTTPException(403, "Reload the Admin page before submitting.")
         return csrf, fields
+
+    def alarm_page(csrf: str, selected: str | None, *, draft: dict[str, str] | None = None,
+                   message: str = "", status: int = 200) -> HTMLResponse:
+        cameras = store.cameras()
+        rules, recent = store.alarm_overview()
+        stored_zone = store.setting("display_timezone")
+        zone = ZoneInfo(stored_zone) if stored_zone else display_zone
+        notice = f'<p class="notice" role="status">{escape(message)}</p>' if message else ""
+        add = ('<a class="camera-add" href="/admin/alarms?camera=#alarm-editor">Add rule</a>'
+               if rules and len(rules) < len(cameras) else "")
+        content = f'''<div class="admin alarm-admin"><p><a href="/admin">Back to Admin</a></p>
+            <div class="camera-heading"><h2>Alarm rules</h2>{add}</div>
+            <p>Paste the destination device's timed VAPIX URL. Log only records matches without contacting the device.</p>{notice}
+            {alarm_table(csrf, cameras, rules, selected, draft)}
+            <section><h3>Recent alarm activity</h3>{alarm_activity(recent, zone)}</section></div>'''
+        return HTMLResponse(page("Alarm rules", content), status_code=status)
+
+    @app.get("/admin/alarms", response_class=HTMLResponse)
+    def alarms(request: Request, camera: str | None = None, saved: bool = False):
+        csrf = admin_csrf(request)
+        if not csrf:
+            return RedirectResponse("/admin", status_code=303)
+        return alarm_page(csrf, camera, message="Alarm rule saved." if saved else "")
+
+    @app.post("/admin/alarms")
+    async def save_alarm(request: Request):
+        csrf, fields = await authorized_form(request)
+        camera = fields.get("camera", "")
+        try:
+            rule = parse_rule(fields)
+            await run_in_threadpool(store.save_alarm_rule, camera, rule)
+        except ValueError as exc:
+            if "@" in fields.get("command", ""):
+                fields["command"] = ""
+            if not fields.get("secret_name", "").strip().startswith(SECRET_PREFIX):
+                fields["secret_name"] = ""
+            return alarm_page(csrf, camera, draft=fields, message=str(exc), status=400)
+        return RedirectResponse("/admin/alarms?" + urlencode({"camera": camera, "saved": "true"}) + "#alarm-editor",
+                                status_code=303)
 
     @app.get("/admin/registered-vehicles/template.csv")
     def registration_template(request: Request):
@@ -1436,9 +1486,17 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                 LOG.exception("PlateLog scheduled registered list refresh failed")
             await asyncio.sleep(30)
 
+    async def supervise_alarms():
+        while True:
+            try:
+                await run_in_threadpool(run_due_alarms, store)
+            except Exception:
+                LOG.exception("PlateLog alarm processing failed")
+            await asyncio.sleep(0.5)
+
     @asynccontextmanager
     async def lifespan(_app):
-        jobs = (supervise_retention, supervise_csv, supervise_registered_refresh) if persistent else ()
+        jobs = (supervise_retention, supervise_csv, supervise_registered_refresh, supervise_alarms) if persistent else ()
         tasks = [asyncio.create_task(job()) for job in jobs]
         try:
             yield
