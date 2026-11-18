@@ -4,17 +4,16 @@ PlateLog is a prototype for a local Axis licence plate register. A persistent in
 
 ## Offline Windows Server pilot
 
-**[IT command sheet](IT-COMMANDS.md)** covers offline setup, workstation certificate trust and Admin password changes.
+**[IT quick start](IT-COMMANDS.md)** has the server setup block, staff PC check and Admin password reset.
 
-The native Python pilot serves the staff register and Admin over **HTTPS on TCP 443** by default. The offline VM test ran on Windows Server 2025 with **CPython 3.15.2 x64** and **SQLite 3.53.4**. Check the SQLite version bundled with the approved interpreter and validate the intended ZIP before accepting live data. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
+Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.4**. The offline ZIP includes Python source, local wheels, a hash-locked requirements file and the deployment guide. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
 
-1. Transfer the reviewed ZIP and its SHA-256 through the site's approved process. The ZIP contains readable Python source, local wheels, hash-locked requirements, and the deployment guide in `START-HERE.md`. Use the [server setup commands](IT-COMMANDS.md#1-install-and-start-on-the-server) to install offline, set the Admin password and start the pilot.
-2. Use an internal DNS name and a matching Server Authentication certificate. Scope TCP 443 to approved staff networks. Use `--port` for an approved alternate port. A fresh pilot requires staff sign-in. Set the staff password in **Admin → Register access**, then check sign-in from a managed PC.
-3. The camera listener starts off. When ready for a controlled camera test, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and configure it to POST to `https://<name>:8766/api/axis/<id>/events`. Verify TLS trust and send a controlled pass from the actual camera.
+- **Staff and Admin** use HTTPS on **TCP 443** by default. Set an alternate staff port with `--port` if IT requires one.
+- **Cameras** use HTTPS on **TCP 8766** when enabled. Follow the [single-camera setup](IT-COMMANDS.md#connect-one-camera).
 
 ### Workstation certificate trust
 
-Use the site's managed certificate policy for staff PCs. The [workstation trust steps](IT-COMMANDS.md#2-trust-the-certificate-on-staff-pcs) cover Group Policy, approved manual imports and the HTTPS check.
+Use the site's managed certificate policy. Run the [staff PC check](IT-COMMANDS.md#2-check-from-a-staff-pc) before handing over the link.
 
 ## Quick start
 
