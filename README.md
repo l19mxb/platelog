@@ -1,6 +1,6 @@
 # PlateLog
 
-PlateLog is a prototype for a local Axis licence plate register. A persistent instance receives Axis HTTP POST events and provides live plate search, vehicle photos, Excel exports and scheduled CSV reports. The [v1 specification](technical-spec.md) describes the wider pilot.
+PlateLog is a prototype for a local Axis licence plate register. A persistent instance receives Axis HTTP POST events and provides live plate search, vehicle photos, Excel exports and scheduled CSV reports. The [technical design notes](technical-spec.md) describe the architecture and proposed features.
 
 ## Offline Windows Server pilot
 
@@ -8,28 +8,13 @@ PlateLog is a prototype for a local Axis licence plate register. A persistent in
 
 The native Python pilot serves the staff register and Admin over **HTTPS on TCP 443** by default. The offline VM test ran on Windows Server 2025 with **CPython 3.15.2 x64** and **SQLite 3.53.4**. Check the SQLite version bundled with the approved interpreter and validate the intended ZIP before accepting live data. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
 
-1. Transfer the reviewed ZIP and its SHA-256 through the site's approved process. The pilot ZIP contains readable Python source, a local wheelhouse and hash-locked requirements. Verify the ZIP checksum and use its `START-HERE.md` to install the wheels offline with the approved Python in a virtual environment.
-2. Give the server an internal DNS name and obtain a Server Authentication certificate with that name in the Subject Alternative Name. Prepare `server.pem` with the server certificate followed by any required intermediates. Restrict access to the matching `server-key.pem` to the runtime account and authorised administrators. Distribute approved public trust material through the site's managed process. [Microsoft certificate deployment](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/distribute-certificates-group-policy)
-3. From the source folder, use the Python interpreter in the prepared virtual environment to set the administrator password and start the pilot. Substitute the site's DNS name and certificate paths.
-
-   ```powershell
-   python -E -s -B -m platelog admin-password --data-dir C:\ProgramData\PlateLog\data
-   python -E -s -B -m platelog pilot --data-dir C:\ProgramData\PlateLog\data `
-       --allowed-host platelog.example.internal --port 443 --tls-cert C:\PlateLog\tls\server.pem `
-       --tls-key C:\PlateLog\tls\server-key.pem
-   ```
-
-4. Allow staff TCP 443 from approved networks. Use `--port` for an approved alternate port. Open the internal HTTPS address from a managed staff PC and confirm it loads with normal certificate validation. A fresh pilot requires staff sign-in. Set the staff password in **Admin → Register access**. After validating the site, stop the interactive process and use the approved Windows process supervisor with the same launch arguments.
-5. The camera listener starts off. When ready for a controlled camera test, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and configure it to POST to `https://<name>:8766/api/axis/<id>/events`. Verify TLS trust and send a controlled pass from the actual camera.
+1. Transfer the reviewed ZIP and its SHA-256 through the site's approved process. The ZIP contains readable Python source, local wheels, hash-locked requirements, and the deployment guide in `START-HERE.md`. Use the [server setup commands](IT-COMMANDS.md#1-install-and-start-on-the-server) to install offline, set the Admin password and start the pilot.
+2. Use an internal DNS name and a matching Server Authentication certificate. Scope TCP 443 to approved staff networks. Use `--port` for an approved alternate port. A fresh pilot requires staff sign-in. Set the staff password in **Admin → Register access**, then check sign-in from a managed PC.
+3. The camera listener starts off. When ready for a controlled camera test, add `--camera-transport https --camera-port 8766` to the launch command. Allow this port only from approved cameras. In **Admin → Axis cameras**, set a distinct credential for each camera and configure it to POST to `https://<name>:8766/api/axis/<id>/events`. Verify TLS trust and send a controlled pass from the actual camera.
 
 ### Workstation certificate trust
 
-For a standalone Windows workstation where IT approves a manual import, run the example below from the repository root. Use the public DER `.cer` file and SHA-256 fingerprint supplied through a trusted IT channel. The script verifies the fingerprint and adds the certificate to the current user's trust store. Add `-WhatIf` to preview the import. Use central certificate deployment for managed staff PCs. [Windows certificate stores](https://learn.microsoft.com/en-us/windows-server/identity/ad-cs/inspect-certificates-manage-certificate-stores)
-
-```powershell
-.\examples\Trust-PlateLogCertificate.ps1 `
-    -CertificatePath 'C:\IT\platelog-ca.cer' -ExpectedSha256 '<64-character SHA-256 from IT>'
-```
+Use the site's managed certificate policy for staff PCs. The [workstation trust steps](IT-COMMANDS.md#2-trust-the-certificate-on-staff-pcs) cover Group Policy, approved manual imports and the HTTPS check.
 
 ## Quick start
 
