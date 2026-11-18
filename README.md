@@ -4,6 +4,8 @@ PlateLog is a prototype for a local Axis licence plate register. A persistent in
 
 ## Offline Windows Server pilot
 
+**[IT command sheet](IT-COMMANDS.md)** covers offline setup, workstation certificate trust and Admin password changes.
+
 The native Python pilot serves the staff register and Admin over **HTTPS on TCP 443** by default. The offline VM test ran on Windows Server 2025 with **CPython 3.15.2 x64** and **SQLite 3.53.4**. Check the SQLite version bundled with the approved interpreter and validate the intended ZIP before accepting live data. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
 
 1. Transfer the reviewed ZIP and its SHA-256 through the site's approved process. The pilot ZIP contains readable Python source, a local wheelhouse and hash-locked requirements. Verify the ZIP checksum and use its `START-HERE.md` to install the wheels offline with the approved Python in a virtual environment.
