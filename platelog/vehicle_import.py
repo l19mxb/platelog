@@ -3,6 +3,7 @@
 import csv
 import posixpath
 import re
+from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile
@@ -15,6 +16,49 @@ MAX_PLATES = 25_000
 SHEET_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 OFFICE_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 PACKAGE_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+
+@dataclass
+class PlateImport:
+    plates: dict[str, str] = field(default_factory=dict)
+    duplicates: int = 0
+    source_format: str = "plates"
+    rows: int = 0
+    excluded_rows: int = 0
+    skipped_entries: int = 0
+    spaces_removed: int = 0
+    shared_plates: int = 0
+    warnings: list[str] = field(default_factory=list)
+    skipped: list[dict] = field(default_factory=list)
+    source_rows: dict[int, str] = field(default_factory=dict)
+
+    def report(self) -> dict:
+        return {"format": self.source_format, "rows": self.rows, "duplicates": self.duplicates,
+                "excluded_rows": self.excluded_rows, "skipped_entries": self.skipped_entries,
+                "spaces_removed": self.spaces_removed, "shared_plates": self.shared_plates,
+                "skipped_rows": len(self.source_rows),
+                "warnings": self.warnings.copy()}
+
+    def skip(self, number: int, entry_number: int, entry: str, vehicle: str, reason: str) -> None:
+        self.skipped_entries += 1
+        self.source_rows[number] = vehicle
+        self.skipped.append({"row": number, "entry_number": entry_number, "entry": entry, "reason": reason})
+        if len(self.warnings) < 20:
+            self.warnings.append(f"Row {number}: {reason}")
+
+    def add(self, key: str, plate: str) -> None:
+        if key in self.plates:
+            self.duplicates += 1
+        else:
+            self.plates[key] = plate
+
+
+class ImportRejected(ValueError):
+    """A rejected import can still supply skipped entries for administrator review."""
+
+    def __init__(self, message: str, imported: PlateImport | None):
+        super().__init__(message)
+        self.imported = imported
 
 
 def xml_part(book: ZipFile, path: str, limit: int) -> ET.Element:
@@ -81,42 +125,116 @@ def excel_rows(data: bytes):
 def csv_rows(data: bytes):
     encoding = "utf-16" if data.startswith((b"\xff\xfe", b"\xfe\xff")) else "utf-8-sig"
     reader = csv.reader(StringIO(data.decode(encoding), newline=""), strict=True)
+    width = None
     for number, row in enumerate(reader, 1):
+        if any(value.strip() for value in row):
+            if width is None:
+                width = len(row)
+            elif len(row) > width:
+                raise ValueError(f"Row {number}: there are more CSV columns than headings. Quote fields containing commas.")
         yield number, {index: (value, True) for index, value in enumerate(row) if value.strip()}
 
 
-def parse_plates(data: bytes, file_type: str) -> tuple[dict[str, str], int]:
+def cardholder_plates(rows, vehicle_column, authorised_column, result: PlateImport) -> PlateImport:
+    unauthorised = set()
+    entries = 0
+    for number, cells in rows:
+        if not cells:
+            continue
+        result.rows += 1
+        if result.rows > MAX_PLATES:
+            raise ValueError(f"An import can contain at most {MAX_PLATES:,} cardholder rows.")
+        status, is_text = cells.get(authorised_column, ("", True))
+        if not is_text or status.strip().casefold() not in {"yes", "no"}:
+            raise ValueError(f"Row {number}: Cardholder Authorised must contain Yes or No.")
+        authorised = status.strip().casefold() == "yes"
+        if not authorised:
+            result.excluded_rows += 1
+        value, is_text = cells.get(vehicle_column, ("", True))
+        if not is_text:
+            if authorised:
+                result.skip(number, 1, value, value, "Vehicle registrations must be text to preserve leading zeros.")
+                raise ValueError(f"Row {number}: enter Vehicle registrations as text to keep leading zeros.")
+            continue
+        for entry_number, entry in enumerate(value.split(","), 1):
+            entries += 1
+            if entries > MAX_PLATES:
+                raise ValueError(f"An import can contain at most {MAX_PLATES:,} registration entries.")
+            trimmed = entry.strip()
+            compact = "".join(trimmed.split())
+            plate = compact.upper()
+            valid = compact.isascii() and plate.isalnum() and 1 <= len(plate) <= 32
+            if not authorised:
+                if valid:
+                    unauthorised.add(plate_key(plate))
+                continue
+            if not valid:
+                reason = ("Empty registration." if not plate else
+                          "Registration exceeds 32 characters." if len(plate) > 32 else
+                          "Contains characters other than letters and numbers. Use commas between registrations.")
+                result.skip(number, entry_number, entry, value, reason)
+                continue
+            if any(char.isspace() for char in trimmed):
+                result.spaces_removed += 1
+            result.add(plate_key(plate), plate)
+    result.shared_plates = len(result.plates.keys() & unauthorised)
+    if not result.plates:
+        raise ValueError("No authorised registrations were found. Check Vehicle and Cardholder Authorised.")
+    return result
+
+
+def parse_plate_import(data: bytes, file_type: str) -> PlateImport:
     if file_type not in {"csv", "xlsx"}:
         raise ValueError("Choose a CSV or .xlsx file.")
+    if len(data) > IMPORT_BYTES:
+        raise ValueError("Plate lists can be up to 4 MiB. Save large workbooks as CSV.")
+    result = None
     try:
         rows = excel_rows(data) if file_type == "xlsx" else csv_rows(data)
         header = next((cells for _, cells in rows if cells), {})
-        columns = [column for column, (value, is_text) in header.items() if is_text and value.strip().casefold() == "plate"]
+        def columns_named(name):
+            return [column for column, (value, is_text) in header.items()
+                    if is_text and value.strip().casefold() == name]
+
+        columns = columns_named("plate")
+        vehicle = columns_named("vehicle")
+        authorised = columns_named("cardholder authorised")
+        if authorised or (vehicle and not columns):
+            if columns or len(vehicle) != 1 or len(authorised) != 1:
+                raise ValueError("Use one Vehicle column and one Cardholder Authorised column, or a separate Plate list.")
+            result = PlateImport(source_format="cardholders")
+            return cardholder_plates(rows, vehicle[0], authorised[0], result)
         if len(columns) != 1:
-            raise ValueError("The first row needs one column named Plate. Download the CSV template for the format.")
-        plates = {}
-        duplicates = 0
+            raise ValueError("The first row needs a Plate column, or Vehicle and Cardholder Authorised columns.")
+        result = PlateImport()
         for number, cells in rows:
             if not cells:
                 continue
+            result.rows += 1
             value, is_text = cells.get(columns[0], ("", True))
             plate = value.strip()
             if not is_text:
+                result.skip(number, 1, value, value, "Plate must be text to preserve leading zeros.")
                 raise ValueError(f"Row {number}: enter the plate as text. In Excel, format the Plate column as Text before entering plates.")
             key = plate_key(plate)
             if (not 1 <= len(key) <= 32 or len(plate) > 128 or
                     any(not (char.isalnum() or char in " -.") for char in plate)):
+                result.skip(number, 1, value, value, "Use 1–32 letters or numbers. Spaces, dashes, and dots are allowed in a Plate list.")
                 raise ValueError(f"Row {number}: enter a plate with 1–32 letters or numbers. Spaces, dashes, and dots are allowed.")
-            if key in plates:
-                duplicates += 1
-            else:
-                plates[key] = plate
-            if len(plates) + duplicates > MAX_PLATES:
+            result.add(key, plate)
+            if result.rows > MAX_PLATES:
                 raise ValueError(f"An import can contain at most {MAX_PLATES:,} plate rows.")
-        if not plates:
+        if not result.plates:
             raise ValueError("Add at least one plate under the Plate heading.")
     except UnicodeError as exc:
-        raise ValueError("Save CSV files as UTF-8, or upload the original .xlsx workbook.") from exc
+        raise ImportRejected("Save CSV files as UTF-8, or upload the original .xlsx workbook.", result) from exc
     except (BadZipFile, ET.ParseError, KeyError, csv.Error, OSError, RuntimeError, DecompressionError) as exc:
-        raise ValueError("PlateLog could not read this file. Save it as CSV or a standard .xlsx workbook and try again.") from exc
-    return plates, duplicates
+        raise ImportRejected("PlateLog could not read this file. Save it as CSV or a standard .xlsx workbook and try again.", result) from exc
+    except ValueError as exc:
+        raise ImportRejected(str(exc), result) from exc
+    return result
+
+
+def parse_plates(data: bytes, file_type: str) -> tuple[dict[str, str], int]:
+    result = parse_plate_import(data, file_type)
+    return result.plates, result.duplicates

@@ -11,17 +11,19 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 SOURCE = Path(__file__).resolve().parents[2]
 APP_FILES = (
-    "README.md", "LICENSE", "technical-spec.md", "requirements.txt", "deploy/windows/README.md",
+    "README.md", "IT-COMMANDS.md", "LICENSE", "technical-spec.md", "requirements.txt", "deploy/windows/README.md",
     "docs/images/register.png", "docs/images/register-search.png", "docs/images/demo-l19mxb.jpg",
     "docs/images/admin-csv-folder.png",
     "examples/Send-AxisEvent.ps1",
     "deploy/windows/PlateLog.xml", "platelog/__init__.py", "platelog/__main__.py",
-    "platelog/alarm_admin.py", "platelog/alarms.py", "platelog/axis.py", "platelog/credentials.py",
-    "platelog/daily_csv.py", "platelog/preview.py", "platelog/receiver.py",
+    "platelog/admin_ui.py", "platelog/alarm_admin.py", "platelog/alarms.py", "platelog/audible.py", "platelog/axis.py", "platelog/credentials.py",
+    "platelog/email_alerts.py",
+    "platelog/daily_csv.py", "platelog/import_review.py", "platelog/preview.py", "platelog/receiver.py",
     "platelog/register_stats.py", "platelog/registered_refresh.py", "platelog/simulator.py", "platelog/store.py",
     "platelog/vehicle_import.py",
     "platelog/fixtures/entry.jpg", "platelog/fixtures/exit.jpg",
-    "tests/test_alarms.py", "tests/test_receiver.py", "tests/test_registered_vehicles.py",
+    "tests/test_alarms.py", "tests/test_audible.py", "tests/test_receiver.py", "tests/test_registered_vehicles.py", "tests/test_smtp.py",
+    "tests/test_passage_history.py",
 )
 VENDOR_FILES = (
     ("python-3.13.17-amd64.exe", "Python", "3.13.17",

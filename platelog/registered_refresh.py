@@ -10,7 +10,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from .store import Store
-from .vehicle_import import IMPORT_BYTES, parse_plates
+from .vehicle_import import IMPORT_BYTES, PlateImport, parse_plate_import
 
 DEFAULT_REFRESH = {"enabled": False, "source": "", "run_time": "01:15"}
 _refresh_lock = Lock()
@@ -45,7 +45,7 @@ def save_refresh_schedule(store: Store, enabled: bool, source: str, run_time: st
                                            configured.isoformat())
 
 
-def read_plate_source(path: Path) -> dict[str, str]:
+def read_plate_source(path: Path) -> PlateImport:
     if not stat.S_ISREG(path.stat().st_mode):
         raise ValueError("The CSV path must point to a regular file.")
     with path.open("rb") as stream:
@@ -56,8 +56,7 @@ def read_plate_source(path: Path) -> dict[str, str]:
         raise ValueError("The CSV file exceeds the 4 MiB import limit.")
     if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != after.st_size:
         raise ValueError("The CSV file was changing during the read. Publish it after it finishes writing.")
-    plates, _ = parse_plates(data, "csv")
-    return plates
+    return parse_plate_import(data, "csv")
 
 
 def refresh_due_registrations(store: Store, display_zone: timezone | ZoneInfo, now: datetime | None = None) -> None:
@@ -81,9 +80,12 @@ def refresh_due_registrations(store: Store, display_zone: timezone | ZoneInfo, n
             return
 
         plates = None
+        report = None
+        imported = None
         error = ""
         try:
-            plates = read_plate_source(csv_source(schedule["source"]))
+            imported = read_plate_source(csv_source(schedule["source"]))
+            plates, report = imported.plates, imported.report()
         except (FileNotFoundError, NotADirectoryError):
             error = "PlateLog could not find the CSV file."
         except PermissionError:
@@ -92,6 +94,8 @@ def refresh_due_registrations(store: Store, display_zone: timezone | ZoneInfo, n
             error = f"PlateLog could not read the CSV file. {exc.strerror or 'File access failed.'}"
         except ValueError as exc:
             error = str(exc)
-        store.finish_registered_refresh(revision, day, current.isoformat(timespec="seconds"), plates, error)
+            imported = getattr(exc, "imported", None)
+        store.finish_registered_refresh(revision, day, current.isoformat(timespec="seconds"), plates, error,
+                                        import_report=report, imported=imported)
     finally:
         _refresh_lock.release()

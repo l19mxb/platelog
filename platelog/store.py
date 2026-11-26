@@ -10,11 +10,16 @@ from pathlib import Path
 from uuid import uuid4
 
 from .alarms import MAX_LIVE_AGE_MS, MAX_LIVE_FUTURE_MS, SETTLE_MS, AlarmRule
+from .audible import DEFAULT_SETTINGS as DEFAULT_SOUNDS
 from .axis import Event, plate_key
+from .email_alerts import DEFAULT_SMTP, DEFAULT_SUBJECT, parse_smtp_settings, smtp_ready
+from .vehicle_import import PlateImport
 
 TRACK_WINDOW_MS = 60_000
 DEFAULT_RETENTION = {"enabled": True, "passage_days": 360, "photo_days": 90}
 LEGACY_RETENTION = {**DEFAULT_RETENTION, "enabled": False}
+IMPORT_HISTORY_LIMIT = 30
+DEFAULT_HISTORY_DAYS = 30
 
 SCHEMA = f"""
 BEGIN IMMEDIATE;
@@ -33,7 +38,10 @@ CREATE TABLE IF NOT EXISTS passages (
     has_new INTEGER NOT NULL DEFAULT 0,
     closed INTEGER NOT NULL DEFAULT 0,
     closing_counter INTEGER,
-    review INTEGER NOT NULL DEFAULT 0
+    review INTEGER NOT NULL DEFAULT 0,
+    history_plate_key TEXT NOT NULL DEFAULT '',
+    registered_at_read INTEGER,
+    registration_generation INTEGER
 );
 CREATE INDEX IF NOT EXISTS passage_track ON passages(camera, profile, area, runtime_id, first_ms);
 CREATE INDEX IF NOT EXISTS passage_order ON passages(first_ms DESC, id DESC);
@@ -75,6 +83,41 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 );
 CREATE TABLE IF NOT EXISTS expired_photos (passage_id TEXT PRIMARY KEY REFERENCES passages(id));
 CREATE TABLE IF NOT EXISTS registered_plates (plate_key TEXT PRIMARY KEY, plate TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS registration_membership (
+    plate_key TEXT NOT NULL,
+    added_generation INTEGER NOT NULL,
+    removed_generation INTEGER,
+    PRIMARY KEY (plate_key, added_generation)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS registration_active ON registration_membership(plate_key)
+    WHERE removed_generation IS NULL;
+CREATE INDEX IF NOT EXISTS registration_closed ON registration_membership(removed_generation)
+    WHERE removed_generation IS NOT NULL;
+CREATE TABLE IF NOT EXISTS registration_import_runs (
+    id TEXT PRIMARY KEY,
+    at_ms INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    error TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS registration_import_rows (
+    run_id TEXT NOT NULL REFERENCES registration_import_runs(id) ON DELETE CASCADE,
+    source_row INTEGER NOT NULL,
+    vehicle TEXT NOT NULL,
+    PRIMARY KEY (run_id, source_row)
+);
+CREATE TABLE IF NOT EXISTS registration_import_skips (
+    run_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    source_row INTEGER NOT NULL,
+    entry_number INTEGER NOT NULL,
+    entry TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (run_id, position),
+    FOREIGN KEY (run_id, source_row) REFERENCES registration_import_rows(run_id, source_row) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS alarm_rules (
     camera TEXT PRIMARY KEY REFERENCES camera_settings(id),
     mode TEXT NOT NULL CHECK (mode IN ('off', 'log', 'live')),
@@ -84,7 +127,10 @@ CREATE TABLE IF NOT EXISTS alarm_rules (
     pulse_seconds INTEGER NOT NULL,
     username TEXT NOT NULL,
     secret_name TEXT NOT NULL,
-    revision TEXT NOT NULL
+    revision TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'vapix',
+    email_recipients TEXT NOT NULL DEFAULT '',
+    email_subject TEXT NOT NULL DEFAULT '{DEFAULT_SUBJECT}'
 );
 CREATE TABLE IF NOT EXISTS alarm_runs (
     passage_id TEXT PRIMARY KEY REFERENCES passages(id) ON DELETE CASCADE,
@@ -94,7 +140,8 @@ CREATE TABLE IF NOT EXISTS alarm_runs (
     plate TEXT NOT NULL,
     result TEXT NOT NULL DEFAULT 'pending',
     result_ms INTEGER,
-    detail TEXT NOT NULL DEFAULT ''
+    detail TEXT NOT NULL DEFAULT '',
+    deliveries TEXT NOT NULL DEFAULT '{{}}'
 );
 CREATE INDEX IF NOT EXISTS alarm_pending ON alarm_runs(due_ms) WHERE result='pending';
 CREATE INDEX IF NOT EXISTS alarm_activity ON alarm_runs(result_ms DESC) WHERE result_ms IS NOT NULL;
@@ -163,6 +210,26 @@ class Store:
                     db.execute("""UPDATE alarm_rules AS r SET (username, secret_name)=(
                                      SELECT d.username,d.secret_name FROM alarm_devices d WHERE d.module=r.module)
                                   WHERE EXISTS (SELECT 1 FROM alarm_devices d WHERE d.module=r.module)""")
+            if "action" not in columns:
+                db.execute("ALTER TABLE alarm_rules ADD COLUMN action TEXT NOT NULL DEFAULT 'vapix'")
+                db.execute("ALTER TABLE alarm_rules ADD COLUMN email_recipients TEXT NOT NULL DEFAULT ''")
+                db.execute(f"ALTER TABLE alarm_rules ADD COLUMN email_subject TEXT NOT NULL DEFAULT '{DEFAULT_SUBJECT}'")
+            run_columns = {column["name"] for column in db.execute("PRAGMA table_info(alarm_runs)")}
+            if "deliveries" not in run_columns:
+                db.execute("ALTER TABLE alarm_runs ADD COLUMN deliveries TEXT NOT NULL DEFAULT '{}'")
+            passage_columns = {column["name"] for column in db.execute("PRAGMA table_info(passages)")}
+            if "history_plate_key" not in passage_columns:
+                db.execute("ALTER TABLE passages ADD COLUMN history_plate_key TEXT NOT NULL DEFAULT ''")
+                db.execute("ALTER TABLE passages ADD COLUMN registered_at_read INTEGER")
+                db.execute("ALTER TABLE passages ADD COLUMN registration_generation INTEGER")
+                # The identity is recoverable; the old registration status is not.
+                db.execute(f"""UPDATE passages SET history_plate_key=coalesce((SELECT plate_key FROM packets
+                               WHERE passage_id=passages.id ORDER BY {PACKET_ORDER} LIMIT 1), '')""")
+            db.execute("""CREATE INDEX IF NOT EXISTS passage_registration_history
+                          ON passages(history_plate_key, registered_at_read, first_ms)""")
+            created = db.execute("INSERT OR IGNORE INTO settings VALUES ('registration_generation','1')")
+            if created.rowcount:
+                db.execute("INSERT INTO registration_membership SELECT plate_key,1,NULL FROM registered_plates")
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.database, timeout=5)
@@ -213,7 +280,7 @@ class Store:
             value = json.dumps({"required": required, "verifier": verifier, "revision": uuid4().hex})
             db.execute("INSERT INTO settings VALUES ('register_access', ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value",
                        (value,))
-            self._audit(db, f"Register sign-in {'required' if required else 'optional'}.")
+            self._audit(db, f"Plate log sign-in {'required' if required else 'optional'}.")
 
     def _audit(self, db: sqlite3.Connection, activity: str) -> None:
         db.execute("INSERT INTO admin_audit(at_ms,activity) VALUES (?,?)", (time.time_ns() // 1_000_000, activity))
@@ -262,29 +329,53 @@ class Store:
     def alarm_overview(self) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
         with closing(self.connect()) as db:
             rules = db.execute("SELECT * FROM alarm_rules ORDER BY camera").fetchall()
-            recent = db.execute("""SELECT passage_id, camera, plate, result, result_ms, detail FROM alarm_runs
+            recent = db.execute("""SELECT passage_id, camera, plate, result, result_ms, detail, deliveries FROM alarm_runs
                                  WHERE result_ms IS NOT NULL ORDER BY result_ms DESC, rowid DESC LIMIT 12""").fetchall()
         return rules, recent
 
+    def smtp_settings(self) -> dict:
+        saved = self.setting("smtp_settings")
+        return json.loads(saved) if saved else DEFAULT_SMTP.copy()
+
+    def save_smtp_settings(self, config: dict) -> None:
+        config = parse_smtp_settings(config)
+        value = json.dumps(config, sort_keys=True)
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT value FROM settings WHERE name='smtp_settings'").fetchone()
+            if previous and json.loads(previous[0]) == config:
+                return
+            db.execute("INSERT INTO settings VALUES ('smtp_settings', ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (value,))
+            db.execute("""UPDATE alarm_runs SET result='held', result_ms=?, detail='SMTP settings changed.'
+                          WHERE result='pending' AND camera IN (SELECT camera FROM alarm_rules WHERE action IN ('smtp','both'))""",
+                       (time.time_ns() // 1_000_000,))
+            self._audit(db, "SMTP settings saved")
+
     def save_alarm_rule(self, camera: str, rule: AlarmRule) -> None:
         values = (rule.mode, rule.trigger, rule.module, rule.virtual_input, rule.pulse_seconds,
-                  rule.username, rule.secret_name)
+                  rule.username, rule.secret_name, rule.action, rule.email_recipients, rule.email_subject)
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             if not db.execute("SELECT 1 FROM camera_settings WHERE id=?", (camera,)).fetchone():
                 raise ValueError("Choose a configured Axis source camera.")
-            if rule.mode == "live" and not (rule.module and rule.username and os.environ.get(rule.secret_name)):
+            if rule.mode == "live" and rule.action != "smtp" and not (rule.module and rule.username and os.environ.get(rule.secret_name)):
                 raise ValueError("Live mode needs a timed HTTPS command, an Axis username, and a password variable set for the PlateLog service.")
-            current = db.execute("""SELECT mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name
+            smtp = db.execute("SELECT value FROM settings WHERE name='smtp_settings'").fetchone()
+            if rule.mode == "live" and rule.action != "vapix" and not (rule.email_recipients and smtp and smtp_ready(json.loads(smtp[0]))):
+                raise ValueError("Live email needs recipients and SMTP settings configured for the PlateLog service.")
+            current = db.execute("""SELECT mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name,
+                                         action, email_recipients, email_subject
                                   FROM alarm_rules WHERE camera=?""", (camera,)).fetchone()
             if current is not None and tuple(current) == values:
                 return
             db.execute("""INSERT INTO alarm_rules
-                          (camera, mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name, revision)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          (camera, mode, plate_status, module, virtual_input, pulse_seconds, username, secret_name,
+                           action, email_recipients, email_subject, revision)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                           ON CONFLICT(camera) DO UPDATE SET mode=excluded.mode, plate_status=excluded.plate_status, module=excluded.module,
                           virtual_input=excluded.virtual_input, pulse_seconds=excluded.pulse_seconds,
                           username=excluded.username, secret_name=excluded.secret_name,
+                          action=excluded.action, email_recipients=excluded.email_recipients, email_subject=excluded.email_subject,
                           revision=excluded.revision""",
                        (camera, *values, uuid4().hex))
             db.execute("""UPDATE alarm_runs SET result='held', result_ms=?, detail='Alarm rule changed.'
@@ -298,16 +389,19 @@ class Store:
                 return None
             db.execute("BEGIN IMMEDIATE")
             run = db.execute(f"""SELECT a.*, r.mode, r.plate_status, r.module, r.virtual_input, r.pulse_seconds, r.username, r.secret_name,
+                                     r.action, r.email_recipients, r.email_subject,
                                      r.revision AS rule_revision, c.mode AS source_mode, p.review
                                   FROM (SELECT * FROM alarm_runs WHERE {due} ORDER BY due_ms, rowid LIMIT 1) a
                                   JOIN alarm_rules r ON r.camera=a.camera JOIN camera_settings c ON c.id=a.camera
                                   JOIN passages p ON p.id=a.passage_id""", (now_ms,)).fetchone()
             if run is None:
                 return None
-            latest = db.execute(f"""SELECT plate, capture_ms, EXISTS (
+            latest = db.execute(f"""SELECT plate, capture_ms, received_ms, EXISTS (
                                         SELECT 1 FROM registered_plates r WHERE r.plate_key=p.plate_key
                                     ) AS registered FROM packets p WHERE passage_id=?
                                     ORDER BY {PACKET_ORDER} LIMIT 1""", (run["passage_id"],)).fetchone()
+            smtp = db.execute("SELECT value FROM settings WHERE name='smtp_settings'").fetchone()
+            smtp_config = json.loads(smtp[0]) if smtp else DEFAULT_SMTP.copy()
             if run["revision"] != run["rule_revision"] or run["mode"] == "off" or run["source_mode"] == "disabled":
                 result, detail = "held", "Alarm rule or source camera is disabled or changed."
             elif not db.execute("SELECT 1 FROM registered_plates LIMIT 1").fetchone():
@@ -319,16 +413,29 @@ class Store:
                     "unregistered", "Plate is absent from the registered list.")
             elif run["mode"] == "log":
                 result = "logged"
-                detail = f'{run["plate_status"].capitalize()} plate matched. A pulse would be requested in Live mode.'
-            elif not (run["username"] and run["secret_name"]):
+                action = {"vapix": "VAPIX", "smtp": "Email", "both": "VAPIX and email"}[run["action"]]
+                detail = f'{run["plate_status"].capitalize()} plate matched. {action} would be requested in Live mode.'
+            elif run["action"] != "smtp" and not (run["username"] and run["secret_name"]):
                 result, detail = "held", "Set the Axis username and password variable for this rule."
+            elif run["action"] != "vapix" and not (run["email_recipients"] and smtp_ready(smtp_config)):
+                result, detail = "held", "Configure SMTP and recipients for this rule."
             elif not -MAX_LIVE_FUTURE_MS <= now_ms - latest["capture_ms"] <= MAX_LIVE_AGE_MS:
                 result, detail = "held", "The plate capture is outside the live alarm window."
             else:
-                result, detail = "dispatching", "A VAPIX request was claimed. Axis has yet to confirm it."
+                result, detail = "dispatching", "Alarm delivery was claimed. Acceptance has not been confirmed."
             db.execute("UPDATE alarm_runs SET plate=?, result=?, result_ms=?, detail=? WHERE passage_id=?",
                        (latest["plate"], result, now_ms, detail, run["passage_id"]))
-            return {**dict(run), "result": result}
+            return {**dict(run), "plate": latest["plate"], "capture_ms": latest["capture_ms"],
+                    "received_ms": latest["received_ms"], "smtp_config": smtp_config, "result": result}
+
+    def record_alarm_delivery(self, passage: str, action: str, result: str, detail: str) -> None:
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT deliveries FROM alarm_runs WHERE passage_id=? AND result='dispatching'", (passage,)).fetchone()
+            if row:
+                deliveries = json.loads(row[0])
+                deliveries[action] = {"result": result, "detail": detail}
+                db.execute("UPDATE alarm_runs SET deliveries=? WHERE passage_id=?", (json.dumps(deliveries), passage))
 
     def finish_alarm(self, passage: str, result: str, detail: str) -> None:
         with closing(self.connect()) as db, db:
@@ -339,8 +446,48 @@ class Store:
         with closing(self.connect()) as db:
             return db.execute("SELECT count(*) FROM registered_plates").fetchone()[0]
 
+    def unregistered_history_days(self) -> int:
+        return int(self.setting("unregistered_history_days") or DEFAULT_HISTORY_DAYS)
+
+    def set_unregistered_history_days(self, days: int) -> None:
+        if type(days) is not int or not 1 <= days <= 3650:
+            raise ValueError("Enter a history window from 1 to 3650 days.")
+        self.set_setting("unregistered_history_days", str(days), f"Unregistered passage history set to {days} days")
+
+    def audible_settings(self) -> dict[str, bool]:
+        saved = self.setting("audible_alerts")
+        return json.loads(saved) if saved else DEFAULT_SOUNDS.copy()
+
+    def audible_events(self, since: int | None, camera: str = "", *, now_ms: int | None = None) -> dict:
+        now = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            saved = db.execute("SELECT value FROM settings WHERE name='audible_alerts'").fetchone()
+            settings = json.loads(saved[0]) if saved else DEFAULT_SOUNDS.copy()
+            has_list = db.execute("SELECT 1 FROM registered_plates LIMIT 1").fetchone() is not None
+            rows = []
+            if since is not None and has_list and any(settings.values()):
+                rows = db.execute(f"""SELECT p.id,
+                    (SELECT min(received_ms) FROM packets WHERE passage_id=p.id) AS first_received,
+                    CASE WHEN EXISTS (SELECT 1 FROM registered_plates WHERE plate_key=latest.plate_key)
+                         THEN 'registered' ELSE 'unregistered' END AS kind
+                    FROM passages p JOIN packets latest ON latest.id=(
+                        SELECT id FROM packets WHERE passage_id=p.id ORDER BY {PACKET_ORDER} LIMIT 1)
+                    WHERE p.first_ms BETWEEN ? AND ? AND latest.capture_ms BETWEEN ? AND ?
+                      AND p.review=0 AND (?='' OR p.camera=?)
+                      AND first_received>? AND first_received<=?
+                      AND (SELECT max(received_ms) FROM packets WHERE passage_id=p.id)<=?
+                    ORDER BY first_received DESC, p.rowid DESC LIMIT 20""",
+                    (now - MAX_LIVE_AGE_MS, now + MAX_LIVE_FUTURE_MS,
+                     now - MAX_LIVE_AGE_MS, now + MAX_LIVE_FUTURE_MS, camera, camera,
+                     max(since, now - MAX_LIVE_AGE_MS), now, now - SETTLE_MS)).fetchall()
+        events = [{"id": row["id"], "received_ms": row["first_received"], "kind": row["kind"]}
+                  for row in reversed(rows) if settings[row["kind"]]]
+        return {"server_ms": now, "settings": settings, "has_registered_list": has_list, "events": events}
+
     def registration_import(self, plates: dict[str, str], replace: bool,
-                            expected_revision: str | None = None) -> dict:
+                            expected_revision: str | None = None, *, imported: PlateImport | None = None,
+                            source: str = "Manual upload") -> dict:
         """Preview changes or apply them atomically against the reviewed revision."""
         with closing(self.connect()) as db, db:
             db.execute("BEGIN" if expected_revision is None else "BEGIN IMMEDIATE")
@@ -349,7 +496,72 @@ class Store:
             if applying and (result["added"] or result["removed"]):
                 mode = "replaced" if replace else "imported"
                 self._audit(db, f"Registered list {mode}: {result['added']} added, {result['removed']} removed")
+            if applying and imported is not None:
+                result["import_run"] = self._record_registration_import(
+                    db, "manual", source, "replace" if replace else "add", imported, result)
             return result
+
+    def _record_registration_import(self, db: sqlite3.Connection, kind: str, source: str, mode: str,
+                                    imported: PlateImport | None, result: dict, error: str = "") -> str:
+        run_id = uuid4().hex
+        summary = {key: result.get(key, 0) for key in ("added", "removed", "total")}
+        summary["import_report"] = imported.report() if imported is not None else {}
+        db.execute("INSERT INTO registration_import_runs VALUES (?,?,?,?,?,?,?)",
+                   (run_id, time.time_ns() // 1_000_000, kind, source, mode, json.dumps(summary), error))
+        if imported is not None:
+            db.executemany("INSERT INTO registration_import_rows VALUES (?,?,?)",
+                           ((run_id, row, value) for row, value in imported.source_rows.items()))
+            db.executemany("INSERT INTO registration_import_skips VALUES (?,?,?,?,?,?)",
+                           ((run_id, position, item["row"], item["entry_number"], item["entry"], item["reason"])
+                            for position, item in enumerate(imported.skipped, 1)))
+        db.execute("""DELETE FROM registration_import_runs WHERE id NOT IN (
+                          SELECT id FROM registration_import_runs ORDER BY rowid DESC LIMIT ?)""", (IMPORT_HISTORY_LIMIT,))
+        return run_id
+
+    def record_registration_failure(self, source: str, mode: str, error: str,
+                                    imported: PlateImport | None = None) -> str:
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            total = db.execute("SELECT count(*) FROM registered_plates").fetchone()[0]
+            run_id = self._record_registration_import(db, "manual", source, mode, imported, {"total": total}, error)
+            self._audit(db, "Registered list upload rejected; current list kept")
+            return run_id
+
+    def registration_import_history(self) -> list[dict]:
+        with closing(self.connect()) as db:
+            rows = db.execute("SELECT * FROM registration_import_runs ORDER BY rowid DESC").fetchall()
+        return [{**dict(row), "summary": json.loads(row["summary"])} for row in rows]
+
+    def registration_import_page(self, run_id: str, page: int = 1, size: int = 50) -> tuple[dict, list, int, int]:
+        size = min(100, max(1, size))
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            run = db.execute("SELECT * FROM registration_import_runs WHERE id=?", (run_id,)).fetchone()
+            if run is None:
+                raise LookupError("This import is no longer in the retained history.")
+            count = db.execute("SELECT count(*) FROM registration_import_skips WHERE run_id=?", (run_id,)).fetchone()[0]
+            pages = max(1, (count + size - 1) // size)
+            page = max(1, min(page, pages))
+            rows = db.execute("""SELECT s.source_row,s.entry_number,substr(s.entry,1,240) AS entry,s.reason,
+                                    substr(r.vehicle,1,240) AS vehicle,
+                                    length(s.entry)>240 AS entry_shortened,length(r.vehicle)>240 AS vehicle_shortened
+                                 FROM registration_import_skips s
+                                 JOIN registration_import_rows r ON r.run_id=s.run_id AND r.source_row=s.source_row
+                                 WHERE s.run_id=? ORDER BY s.position LIMIT ? OFFSET ?""",
+                              (run_id, size, (page - 1) * size)).fetchall()
+        return {**dict(run), "summary": json.loads(run["summary"])}, rows, page, pages
+
+    def registration_skipped_rows(self, run_id: str) -> list:
+        with closing(self.connect()) as db:
+            db.execute("BEGIN")
+            if not db.execute("SELECT 1 FROM registration_import_runs WHERE id=?", (run_id,)).fetchone():
+                raise LookupError("This import is no longer in the retained history.")
+            return db.execute("""SELECT r.source_row,r.vehicle,
+                                    group_concat('Entry ' || s.entry_number || ': ' || s.entry, char(10)) AS entries,
+                                    group_concat('Entry ' || s.entry_number || ': ' || s.reason, char(10)) AS reasons
+                                 FROM registration_import_rows r JOIN registration_import_skips s
+                                   ON s.run_id=r.run_id AND s.source_row=r.source_row
+                                 WHERE r.run_id=? GROUP BY r.source_row ORDER BY r.source_row""", (run_id,)).fetchall()
 
     def _registration_changes(self, db: sqlite3.Connection, plates: dict[str, str], replace: bool,
                               *, apply: bool, expected_revision: str | None = None) -> dict:
@@ -365,6 +577,11 @@ class Store:
         if total > 50_000:
             raise ValueError("The registered list can hold up to 50,000 plates.")
         if apply and (added or removed):
+            generation = int(db.execute("SELECT value FROM settings WHERE name='registration_generation'").fetchone()[0]) + 1
+            db.executemany("""UPDATE registration_membership SET removed_generation=?
+                              WHERE plate_key=? AND removed_generation IS NULL""", ((generation, key) for key in removed))
+            db.executemany("INSERT INTO registration_membership VALUES (?,?,NULL)", ((key, generation) for key in added))
+            db.execute("UPDATE settings SET value=? WHERE name='registration_generation'", (str(generation),))
             db.executemany("DELETE FROM registered_plates WHERE plate_key=?", ((key,) for key in removed))
             db.executemany("INSERT INTO registered_plates VALUES (?,?)", ((key, plates[key]) for key in added))
             db.execute("""INSERT INTO settings VALUES ('registered_plates_revision',?)
@@ -390,7 +607,8 @@ class Store:
             self._audit(db, activity)
 
     def finish_registered_refresh(self, revision: str, day: str, attempted_at: str,
-                                  plates: dict[str, str] | None, error: str = "") -> None:
+                                  plates: dict[str, str] | None, error: str = "", *,
+                                  import_report: dict | None = None, imported: PlateImport | None = None) -> None:
         """Commit the replacement and its status together if the schedule is still current."""
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -406,10 +624,17 @@ class Store:
             if plates:
                 result = self._registration_changes(db, plates, True, apply=True)
                 latest.update({key: result[key] for key in ("added", "removed", "total")})
+                if import_report is not None:
+                    latest["import_report"] = import_report
                 status["last_success"] = latest
                 activity = f"Scheduled registered list refreshed: {result['added']} added, {result['removed']} removed"
+                if import_report and import_report["skipped_entries"]:
+                    activity += f", {import_report['skipped_entries']} registration entries skipped"
             else:
                 activity = f"Scheduled registered list refresh failed: {error}"
+            latest["import_run"] = self._record_registration_import(
+                db, "scheduled", json.loads(schedule[0])["source"], "replace", imported,
+                latest if plates else {"total": db.execute("SELECT count(*) FROM registered_plates").fetchone()[0]}, error)
             status["last_attempt"] = latest
             db.execute("""INSERT INTO settings VALUES ('registered_refresh_status',?)
                           ON CONFLICT(name) DO UPDATE SET value=excluded.value""", (json.dumps(status),))
@@ -460,6 +685,10 @@ class Store:
             db.execute("DELETE FROM expired_photos WHERE passage_id IN (SELECT id FROM passages WHERE last_ms<?)", (passage_before,))
             db.execute("DELETE FROM packets WHERE passage_id IN (SELECT id FROM passages WHERE last_ms<?)", (passage_before,))
             passages = db.execute("DELETE FROM passages WHERE last_ms<?", (passage_before,)).rowcount
+            # Keep the list intervals needed for corrections to retained passages.
+            generation = int(db.execute("SELECT value FROM settings WHERE name='registration_generation'").fetchone()[0])
+            oldest = db.execute("SELECT min(registration_generation) FROM passages").fetchone()[0]
+            db.execute("DELETE FROM registration_membership WHERE removed_generation<=?", (oldest if oldest is not None else generation,))
             db.execute("INSERT INTO settings VALUES ('retention_last_run',?) ON CONFLICT(name) DO UPDATE SET value=excluded.value", (str(now),))
             if manual or photos or passages:
                 action = "Manual purge" if manual else "Retention"
@@ -550,6 +779,7 @@ class Store:
                     (event.capture_ms, event.capture_ms, int(event.state == "new"),
                      int(event.state == "lost"), event.counter if event.state == "lost" else None, passage),
                 )
+                self._snapshot_registration(db, passage, new_passage)
                 due_ms = received_ms + SETTLE_MS
                 if new_passage:
                     db.execute("""INSERT INTO alarm_runs (passage_id, camera, revision, due_ms, plate)
@@ -567,6 +797,22 @@ class Store:
             except (OSError, sqlite3.Error):
                 pass
             raise
+
+    def _snapshot_registration(self, db: sqlite3.Connection, passage: str, new_passage: bool) -> None:
+        row = db.execute(f"""SELECT p.registration_generation,p.review,latest.plate_key FROM passages p
+                             JOIN packets latest ON latest.rowid=(SELECT rowid FROM packets WHERE passage_id=p.id
+                                                                  ORDER BY {PACKET_ORDER} LIMIT 1)
+                             WHERE p.id=?""", (passage,)).fetchone()
+        generation = row["registration_generation"]
+        if new_passage and db.execute("SELECT 1 FROM registered_plates LIMIT 1").fetchone():
+            generation = int(db.execute("SELECT value FROM settings WHERE name='registration_generation'").fetchone()[0])
+        registered = None
+        if generation is not None and not row["review"]:
+            registered = int(db.execute("""SELECT 1 FROM registration_membership WHERE plate_key=?
+                                          AND added_generation<=? AND (removed_generation IS NULL OR removed_generation>?) LIMIT 1""",
+                                       (row["plate_key"], generation, generation)).fetchone() is not None)
+        db.execute("UPDATE passages SET history_plate_key=?,registered_at_read=?,registration_generation=? WHERE id=?",
+                   (row["plate_key"], registered, generation, passage))
 
     def reconcile(self) -> None:
         with closing(self.connect()) as db, db:
@@ -590,6 +836,7 @@ class Store:
         direction = next((packet["direction"] for packet in packets if packet["direction"] != "unknown"), "unknown")
         return {"id": row["id"], "camera": row["camera"], "capture_ms": row["first_ms"],
                 "plate": packets[0]["plate"], "direction": direction,
+                "registered_at_read": bool(row["registered_at_read"]) if row["registered_at_read"] is not None else None,
                 "closed": bool(row["closed"]), "review": bool(row["review"]),
                 "packets": len(packets), "images": len(photos), "photo_id": photos[0]["id"] if photos else None,
                 "photo_expired": not photos and db.execute("SELECT 1 FROM expired_photos WHERE passage_id=?", (row["id"],)).fetchone() is not None,
@@ -616,12 +863,25 @@ class Store:
             page = min(page, last)
             rows = self._matching_passages(db, args, size, (page - 1) * size)
             if rows:
+                saved_days = db.execute("SELECT value FROM settings WHERE name='unregistered_history_days'").fetchone()
+                days = int(saved_days[0]) if saved_days else DEFAULT_HISTORY_DAYS
                 keys = [plate_key(row["plate"]) for row in rows]
                 placeholders = ",".join("?" for _ in keys)
                 registered = {row[0] for row in db.execute(
                     f"SELECT plate_key FROM registered_plates WHERE plate_key IN ({placeholders})", keys)}
                 for row, key in zip(rows, keys):
                     row["registered"] = key in registered
+                    lower, upper = row["capture_ms"] - days * 86_400_000, row["capture_ms"]
+                    # Two covering-index range counts, independent of the visible filters.
+                    counts = db.execute("""SELECT
+                        (SELECT count(*) FROM passages WHERE history_plate_key=? AND registered_at_read=0
+                         AND first_ms>=? AND first_ms<=?) AS unregistered,
+                        (SELECT count(*) FROM passages WHERE history_plate_key=? AND registered_at_read IS NULL
+                         AND first_ms>=? AND first_ms<=?) AS unknown""", (key, lower, upper, key, lower, upper)).fetchone()
+                    # The column shows earlier visits, so remove this passage's own contribution.
+                    row.update(history_days=days,
+                               unregistered_passes=counts["unregistered"] - int(row["registered_at_read"] is False),
+                               history_unknown=counts["unknown"] - int(row["registered_at_read"] is None))
             return rows, total, page
 
     def export_passages(self, plate: str, camera: str, limit: int, *,

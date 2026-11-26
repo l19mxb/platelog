@@ -29,8 +29,10 @@ from PIL import Image
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .alarm_admin import alarm_activity, alarm_table
+from .admin_ui import CSS as ADMIN_CSS, JS as ADMIN_JS, SECTIONS, admin_shell, field, help_tip
+from .alarm_admin import alarm_activity, alarm_table, smtp_form
 from .alarms import SECRET_PREFIX, parse_rule, run_due_alarms
+from .audible import JS as AUDIBLE_JS, REGISTER_CONTROL, settings_form as audible_settings_form
 from .credentials import (
     INITIAL_ADMIN_PREFIX,
     MIN_PASSWORD_LENGTH,
@@ -39,11 +41,13 @@ from .credentials import (
     password_verifier,
 )
 from .daily_csv import check_report_folder, export_due_report, report_folder, report_schedule
+from .email_alerts import DEFAULT_SMTP, SMTP_SECRET_PREFIX, parse_smtp_settings, test_smtp_connection
+from .import_review import review_content, review_url, skipped_csv
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
 from .register_stats import render_stats
 from .registered_refresh import refresh_due_registrations, refresh_schedule, refresh_status, save_refresh_schedule
 from .store import RegistrationChanged, Store
-from .vehicle_import import IMPORT_BYTES, parse_plates
+from .vehicle_import import IMPORT_BYTES, parse_plate_import
 
 CSS = """
 :root { font: 16px/1.5 system-ui, sans-serif; color: #172638; background: #f4f7fa; }
@@ -74,6 +78,8 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 .alarm-credentials { display: grid; gap: 4px; min-width: 13rem; }
 .alarm-credentials input { box-sizing: border-box; width: 100%; }
 .alarm-actions { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+.register-audio:not([hidden]), .sound-tests { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.register-audio span { font-size: .85rem; color: #4b5d70; }
 .camera-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .camera-heading h3, .camera-editor h4 { margin: 0; }
 .camera-add { padding: 5px 10px; border-radius: 5px; background: #194b79; color: white; text-decoration: none; }
@@ -108,6 +114,20 @@ header { margin-bottom: 28px; } header p, .muted, caption { color: #4b5d70; }
 #registered-refresh .source-path { flex: 1 1 20rem; min-width: 0; }
 .import-samples { display: flex; flex-wrap: wrap; gap: 10px 28px; }
 .import-samples ul { margin-block: 4px; max-height: 10rem; overflow-y: auto; }
+.import-review { max-width: 70rem; }
+.import-review .review-table { overflow-x: auto; }
+.import-review table { min-width: 48rem; table-layout: fixed; }
+.import-review :is(th, td) { white-space: normal; overflow-wrap: anywhere; }
+.import-review th:nth-child(1) { width: 5rem; }
+.import-review th:nth-child(2) { width: 3rem; }
+.import-review th:nth-child(3) { width: 22%; }
+.import-review th:nth-child(4) { width: 18%; }
+.import-review .review-value { max-width: 24rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.import-review form label { flex: 1 1 22rem; min-width: 0; max-width: 100%; }
+.import-review select { box-sizing: border-box; width: 100%; min-width: 0; }
+.import-review dl { grid-template-columns: max-content minmax(0, 1fr); }
+.import-review dd { overflow-wrap: anywhere; }
+.import-review .pagination { display: flex; align-items: center; gap: 16px; margin-block: 12px; }
 .register-stats { margin: 0 0 14px; padding: 8px 12px; border: 1px solid #d3dce5; border-radius: 6px; background: white; }
 .register-stats h2 { font-size: 1rem; }
 .stats-metrics { display: flex; flex-wrap: wrap; gap: 6px clamp(24px, 5vw, 72px); margin: 5px 0 8px; }
@@ -150,8 +170,16 @@ tr[data-registered="false"] { --registration-color: #a21b25; }
 tr[data-registered] .photo { box-sizing: border-box; border: 2px solid var(--registration-color); }
 tr[data-registered] .registration a, .registration-status { color: var(--registration-color); }
 .registration-status { display: block; font-size: .75rem; }
+.history-heading { white-space: normal; min-width: 7.5rem; }
+.history-heading .history-label { display: inline-block; vertical-align: middle; line-height: 1.3; }
+.history-heading .history-window { display: block; font-weight: 400; font-size: .75rem; }
+.passage-history { font-variant-numeric: tabular-nums; }
+.passage-history strong { font-size: 1.05rem; }
+.history-unknown { display: block; color: #4b5d70; font-size: .75rem; }
 td[data-column] { white-space: normal; overflow-wrap: anywhere; }
+td[data-column="make"], td[data-column="colour"] { white-space: nowrap; overflow-wrap: normal; }
 figure { margin: 12px 0; } figure img { display: block; width: auto; max-width: min(100%, 640px); height: auto; border-radius: 5px; }
+main:has(#show-history:not(:checked)) [data-column="history"],
 main:has(#show-make:not(:checked)) [data-column="make"],
 main:has(#show-model:not(:checked)) [data-column="model"],
 main:has(#show-colour:not(:checked)) [data-column="colour"] { display: none; }
@@ -393,7 +421,7 @@ if (vehicleImport) {
 
     async function upload(action, selection) {
         const { file, mode, format, receipt } = selection;
-        const query = new URLSearchParams({ mode, format });
+        const query = new URLSearchParams({ mode, format, filename: file.name });
         const headers = { 'X-CSRF-Token': vehicleImport.dataset.csrf };
         if (receipt) headers['X-Import-Receipt'] = receipt;
         if (replaceCheck.checked) headers['X-Confirm-Replace'] = 'yes';
@@ -445,10 +473,19 @@ if (vehicleImport) {
             reviewed = { file, mode, format, receipt: result.receipt };
             preview.querySelector('[data-import-summary]').textContent =
                 `${result.added.toLocaleString()} added · ${result.existing.toLocaleString()} kept from file · ` +
-                `${result.removed.toLocaleString()} removed · ${result.duplicates.toLocaleString()} duplicate rows skipped · ` +
+                `${result.removed.toLocaleString()} removed · ${result.duplicates.toLocaleString()} duplicate registrations skipped · ` +
                 `${result.total.toLocaleString()} plates after import`;
+            const report = result.import_report;
+            preview.querySelector('[data-import-notes]').textContent = report.format === 'cardholders'
+                ? `${report.excluded_rows.toLocaleString()} non-authorised rows excluded · ` +
+                  `${report.skipped_entries.toLocaleString()} invalid or empty entries skipped · ` +
+                  `${report.spaces_removed.toLocaleString()} entries had spaces removed. ` +
+                  'Check that commas separate different registrations. ' +
+                  (report.shared_plates ? `${report.shared_plates.toLocaleString()} plates appear under both Yes and No; an authorised Yes entry takes priority.` : '')
+                : '';
             showSample('[data-import-sample]', result.sample.map(row => `${row.action}: ${row.plate}`));
             showSample('[data-import-removals]', result.removed_sample);
+            showSample('[data-import-warnings]', report.warnings);
             replaceCheck.required = mode === 'replace';
             replaceCheck.parentElement.hidden = mode !== 'replace';
             preview.hidden = false;
@@ -463,7 +500,8 @@ if (vehicleImport) {
         withUpload(async () => {
             const result = await upload('apply', reviewed);
             region.querySelector('[data-registered-count]').textContent = result.total.toLocaleString();
-            message.textContent = `Import complete. ${result.added.toLocaleString()} added, ${result.removed.toLocaleString()} removed.`;
+            message.textContent = `Import complete. ${result.added.toLocaleString()} added, ${result.removed.toLocaleString()} removed.` +
+                (result.import_report.skipped_entries ? ` ${result.import_report.skipped_entries.toLocaleString()} invalid or empty entries were skipped. Open Skipped entries for the full details.` : '');
             vehicleImport.reset();
             resetPreview();
         });
@@ -642,15 +680,16 @@ def timestamp(value: int) -> str:
 
 
 def page(title: str, content: str, *, show_admin: bool = True, header_extra: str = "") -> str:
-    tab = "admin" if title in {"Admin", "Alarm rules"} else "register"
+    tab = "admin" if title in {"Admin", "Alarm rules", "Skipped entries"} else "register"
     register_current = ' aria-current="page"' if tab == "register" else ""
     admin_current = ' aria-current="page"' if tab == "admin" else ""
     admin_link = f'<a href="/admin"{admin_current}>Admin</a>' if show_admin else ""
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>{escape(title)} | PlateLog</title><link rel="stylesheet" href="/preview.css"><script defer src="/preview.js"></script></head>
-    <body><main><header><div class="header-top"><div><h1>PlateLog</h1><p>Vehicle passage register</p></div>{header_extra}</div>
-    <nav class="tabs" aria-label="PlateLog"><a href="/"{register_current}>Register</a>
+    <title>{escape(title)} | PlateLog</title><link rel="stylesheet" href="/preview.css"><script defer src="/preview.js"></script>
+    <script defer src="/audible.js"></script><script defer src="/admin.js"></script></head>
+    <body{' class="admin-page"' if tab == 'admin' else ''}><main><header><div class="header-top"><div><h1 title="🧠 by Liam.">PlateLog</h1><p>Vehicle passage log</p></div>{header_extra}</div>
+    <nav class="tabs" aria-label="PlateLog"><a href="/" title="🧠 by Liam."{register_current}>Plate log</a>
     {admin_link}</nav></header>{content}</main></body></html>"""
 
 
@@ -702,7 +741,7 @@ def camera_table(rows: list[Row], selected: str | None) -> str:
     entries = []
     for row in rows:
         camera_id = escape(row["id"])
-        camera_url = urlencode({"camera": row["id"]})
+        camera_url = urlencode({"section": "axis-cameras", "camera": row["id"]})
         mode = row["mode"]
         username = escape(row["username"]) if mode == "basic" and row["username"] else "—"
         active = " data-selected" if row["id"] == selected else ""
@@ -725,7 +764,8 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
     safe_id = escape(camera_id)
     draft_id = escape(error.camera_id) if error else ""
     identity = (f'<input type="hidden" name="camera_id" value="{safe_id}">' if camera_id else
-                f'<label>Camera ID <input name="camera_id" value="{draft_id}" maxlength="64" placeholder="entry" required></label>')
+                field("camera-id", "Camera ID", f'<input name="camera_id" value="{draft_id}" maxlength="64" placeholder="entry" required>',
+                      "A unique name for this source camera. Use lowercase letters, digits, dashes or underscores. The ID forms part of its POST path."))
     password_id = f"camera-password-saved-{safe_id}" if camera_id else "camera-password-new"
     hint_id = f"{password_id}-hint"
     password_invalid = error is not None and error.password_invalid
@@ -738,18 +778,22 @@ def camera_form(csrf: str, camera_id: str = "", mode: str = "disabled", username
     alert = f'<p class="camera-password-error" role="alert">{escape(error.message)}</p>' if error and not password_invalid else ""
     title = f"Edit {safe_id}" if camera_id else "Add a camera"
     path = f'<p>POST path <code>/api/axis/{safe_id}/events</code></p>' if camera_id else ""
+    auth = field("camera-auth", "POST authentication", f'<select name="mode">{options}</select>',
+                 "Disabled rejects camera events. HTTP Basic requires the camera to send a matching username and password. No authentication accepts events from any client that can reach this endpoint.")
+    user = field("camera-user", "Username", f'<input name="username" maxlength="128" autocomplete="off" value="{escape(username)}">',
+                 "Enter the same username in the camera's push event settings. Do not use spaces or colons.")
+    password_tip = help_tip("camera-password", "Password", "Use at least 14 characters. Set the same password on the source camera. Leave blank to retain the saved password for the same username.")
     return f'''<div id="camera-editor" class="camera-editor"><h4>{title}</h4>{path}{alert}
     <form class="camera-form" method="post" action="/admin/cameras#camera-editor"><input type="hidden" name="csrf" value="{csrf}">
-        {identity}<label>POST authentication <select name="mode">{options}</select></label>
+        {identity}{auth}
         <div class="camera-auth-fields">
-            <label>Username <input name="username" maxlength="128" autocomplete="off" value="{escape(username)}"></label>
-            <div class="camera-password"><label for="{password_id}">Password</label>
+            {user}<div class="camera-password field"><div class="field-label"><label for="{password_id}">Password</label>{password_tip}</div>
             <input id="{password_id}" type="password" name="password" autocomplete="new-password"
                 minlength="{MIN_PASSWORD_LENGTH}" aria-describedby="{hint_id}"{invalid}>
             {hint}</div>
         </div>
         <div class="camera-actions"><button type="submit">{'Save camera' if camera_id else 'Add camera'}</button>
-        <a href="/admin#axis-cameras">Cancel</a></div></form></div>'''
+        <a href="/admin?section=axis-cameras">Cancel</a></div></form></div>'''
 
 
 def csv_schedule_form(store: Store, csrf: str, zone: str, *, draft: dict | None = None,
@@ -763,16 +807,18 @@ def csv_schedule_form(store: Store, csrf: str, zone: str, *, draft: dict | None 
         result = (f'<p>{label} on {escape(last["attempted_at"])}. {escape(last["message"])}</p>'
                   f'<p><code>{escape(last["file"])}</code></p>')
     folder_notice = f'<p class="folder-result" role="status">{escape(folder_result)}</p>' if folder_result else ""
+    run_time = field("csv-run", "Run time", f'<input type="time" name="run_time" value="{escape(schedule["run_time"])}" required>',
+                     f"The daily export runs in {zone} time and covers the previous local calendar day.")
+    folder = field("csv-folder", "Destination folder", f'<input name="folder" value="{escape(schedule["folder"])}" maxlength="1024" spellcheck="false">',
+                   "Use a full server path or Windows UNC share. The PlateLog service account needs write access. Test folder writes, reads and removes a temporary file without changing the schedule.", wide=True)
     return f'''<section id="csv-reports"><h3>Daily CSV report</h3>
         <p>Exports the previous calendar day in {escape(zone)}, with a header row and one row per passage.</p>
-        <form method="post" action="/admin/csv-schedule"><input type="hidden" name="csrf" value="{csrf}">
-        <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule['enabled'] else ''}> Enable daily CSV export</label>
-        <label>Run time <input type="time" name="run_time" value="{escape(schedule['run_time'])}" required></label>
-        <label class="destination">Destination folder <input name="folder" value="{escape(schedule['folder'])}" maxlength="1024" spellcheck="false"></label>
-        <button type="submit" name="test_folder" value="yes" formaction="/admin/csv-schedule#csv-reports" formnovalidate>Test folder</button>
-        <p>Use a folder on the server or a Windows UNC share that the PlateLog service account can write to.
-        PlateLog names each file <code>platelog-YYYY-MM-DD.csv</code>.</p>
-        <button type="submit">Save CSV schedule</button></form>{folder_notice}{result}</section>'''
+        <form class="form-grid" method="post" action="/admin/csv-schedule"><input type="hidden" name="csrf" value="{csrf}">
+        <label class="enable field-wide"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule['enabled'] else ''}> Enable daily CSV export</label>
+        {run_time}{folder}<p class="form-note">Files are named <code>platelog-YYYY-MM-DD.csv</code>.</p>
+        <div class="form-actions"><button type="submit">Save CSV schedule</button>
+        <button class="secondary" type="submit" name="test_folder" value="yes" formaction="/admin/csv-schedule#csv-reports" formnovalidate>Test folder</button></div>
+        </form>{folder_notice}{result}</section>'''
 
 
 def register_destination(value: str) -> str:
@@ -804,37 +850,55 @@ def registered_refresh_form(store: Store, csrf: str, zone: str, *, draft: dict |
     if success:
         result = (f'<p>Last successful refresh {run_time(success)}. '
                   f'{success["total"]:,} plates · {success["added"]:,} added · {success["removed"]:,} removed.</p>')
+        report = success.get("import_report", {})
+        if report.get("format") == "cardholders":
+            result += (f'<p>{report["excluded_rows"]:,} non-authorised rows excluded · '
+                       f'{report["skipped_entries"]:,} invalid or empty entries skipped · '
+                       f'{report["spaces_removed"]:,} entries had spaces removed. '
+                       'Check that commas separate different registrations.</p>')
+            if report["shared_plates"]:
+                result += (f'<p>{report["shared_plates"]:,} plates appear under both Yes and No. '
+                           'An authorised Yes entry takes priority.</p>')
+            if report["warnings"]:
+                warnings = "".join(f'<li>{escape(warning)}</li>' for warning in report["warnings"])
+                result += f'<details><summary>First 20 entries for review</summary><ul>{warnings}</ul></details>'
     if attempt.get("error"):
         result += (f'<p>Last refresh failed {run_time(attempt)}. {escape(attempt["error"])} '
                    'The current list was kept.</p>')
+    if attempt.get("import_run"):
+        result += f'<p><a href="{escape(review_url(attempt["import_run"]))}">View skipped entries for this refresh</a></p>'
     message = f'<p class="notice" role="status">{escape(notice)}</p>' if notice else ""
+    source_field = field("refresh-source", "CSV file path", f'<input name="source" value="{escape(schedule["source"])}" maxlength="1024" spellcheck="false">',
+                         "A full path on the server or a Windows UNC share readable by the service account. A successful refresh replaces the registered list; a failed refresh keeps the current list.", wide=True)
+    time_field = field("refresh-time", "Refresh time", f'<input type="time" name="run_time" value="{escape(schedule["run_time"])}" required>',
+                       f"Run once each day in {zone} time. Invalid or empty authorised entries are recorded in Skipped entries.")
     return f'''<section id="registered-refresh"><h4>Scheduled list refresh</h4>
         <p>Replace the registered list once a day from a CSV in {escape(zone)} time.</p>
-        <form method="post" action="/admin/registered-refresh#registered-refresh">
+        <form class="form-grid" method="post" action="/admin/registered-refresh#registered-refresh">
             <input type="hidden" name="csrf" value="{csrf}">
-            <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule["enabled"] else ''}> Enable scheduled refresh</label>
-            <label class="source-path">CSV file path <input name="source" value="{escape(schedule["source"])}" maxlength="1024" spellcheck="false"></label>
-            <label>Refresh time <input type="time" name="run_time" value="{escape(schedule["run_time"])}" required></label>
-            <button type="submit">Save refresh schedule</button></form>
-        <p>Use a full path on the server or a Windows UNC share that the PlateLog service can read.</p>
+            <label class="enable field-wide"><input type="checkbox" name="enabled" value="yes" {'checked' if schedule["enabled"] else ''}> Enable scheduled refresh</label>
+            {source_field}{time_field}<div class="form-actions"><button type="submit">Save refresh schedule</button></div></form>
         {message}{result}</section>'''
 
 
 def registered_vehicles_form(csrf: str, count: int, refresh: str) -> str:
-    return f'''<section id="registered-vehicles"><h3>Registered vehicles</h3>
+    upload = field("plate-file", "Plate list", '<input type="file" name="plate_file" accept=".csv,.xlsx" required>',
+                   "Use a CSV or XLSX with a Plate column, or Vehicle and Cardholder Authorised columns. Keep registrations as Text in Excel to preserve leading zeros. Commas separate plates; spaces are removed; punctuation is skipped for review.")
+    mode = field("import-mode", "Import mode", '<select name="import_mode"><option value="add">Add to existing list</option><option value="replace">Replace entire list</option></select>',
+                 "Add keeps existing registrations. Replace removes registrations absent from the file, after you preview and confirm the change.")
+    return f'''<section id="registered-vehicles"><h3>Import list</h3>
         <p><strong data-registered-count>{count:,}</strong> registered plates ·
-        <a href="/admin/registered-vehicles/template.csv" class="camera-add">Download CSV template</a></p>
-        <p>Use a column named Plate in your CSV or the first Excel sheet. Format the Excel Plate column as Text to keep leading zeros.</p>
-        <form id="vehicle-import" data-csrf="{csrf}" method="post">
-            <label class="import-file">Plate list <input type="file" name="plate_file" accept=".csv,.xlsx" required></label>
-            <label>Import mode <select name="import_mode"><option value="add">Add to existing list</option>
-            <option value="replace">Replace entire list</option></select></label>
-            <button type="submit">Preview import</button></form>
+        <a href="/admin/registered-vehicles/template.csv">Download CSV template</a> ·
+        <a href="/admin/import-review">Skipped entries</a></p>
+        <p>Comma-separated registrations; spaces removed. Only authorised Yes rows are registered in cardholder exports.</p>
+        <form class="form-grid" id="vehicle-import" data-csrf="{csrf}" method="post">{upload}{mode}
+            <div class="form-actions"><button type="submit">Preview import</button></div></form>
         <p data-import-message role="status"></p>
         <div data-import-preview hidden>
-            <h4>Review import</h4><p data-import-summary></p>
+            <h4>Review import</h4><p data-import-summary></p><p data-import-notes></p>
             <div class="import-samples"><div>First 20 file entries<ul data-import-sample></ul></div>
-                <div hidden>First 20 removals<ul data-import-removals></ul></div></div>
+                <div hidden>First 20 removals<ul data-import-removals></ul></div>
+                <div hidden>First 20 entries for review<ul data-import-warnings></ul></div></div>
             <form data-import-confirm method="post">
                 <label class="enable" hidden><input type="checkbox" name="confirm_replace" value="yes">
                 Remove all currently registered plates missing from this file</label>
@@ -902,7 +966,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             if request.url.query:
                 destination += "?" + request.url.query
             raise HTTPException(303, headers={"Location": "/login?" + urlencode({"next": register_destination(destination)})})
-        raise HTTPException(401, "Sign in to view the register.")
+        raise HTTPException(401, "Sign in to view the plate log.")
 
     def sign_in(request: Request, destination: str, cookie: str, active: dict, revision: str) -> RedirectResponse:
         now = time.monotonic()
@@ -977,11 +1041,11 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         config = register_access() if persistent else None
         csrf = staff_csrf(request, config) if config else None
         if not csrf or not hmac.compare_digest(csrf.encode(), fields.get("csrf", "").encode()):
-            raise HTTPException(403, "Reload the register before signing out.")
+            raise HTTPException(403, "Reload the plate log before signing out.")
         return sign_out(request, "/", STAFF_COOKIE, staff_sessions)
 
     def show(content: str, status: int = 200) -> HTMLResponse:
-        return HTMLResponse(page("Admin", f'<div class="admin"><h2>Admin</h2>{content}</div>'), status_code=status)
+        return HTMLResponse(page("Admin", f'<div class="admin admin-login"><h2>Admin</h2>{content}</div>'), status_code=status)
 
     def login_page(message: str = "", status: int = 200) -> HTMLResponse:
         notice = f'<p role="alert">{escape(message)}</p>' if message else ""
@@ -990,105 +1054,130 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             <button type="submit">Sign in</button></form>''', status)
 
     def password_form(csrf: str) -> str:
+        current = field("admin-current", "Current password", '<input type="password" name="current_password" autocomplete="current-password" required>',
+                        "Enter the administrator password used for this sign-in.")
+        new = field("admin-new", "New password", '<input type="password" name="new_password" autocomplete="new-password" minlength="14" required>',
+                    "Use at least 14 characters and no more than 1,024 UTF-8 bytes. Changing the password ends all administrator sessions.")
+        confirm = field("admin-confirm", "Confirm new password", '<input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required>')
         return f'''<section><h3>Change administrator password</h3>
-            <form method="post" action="/admin/password"><input type="hidden" name="csrf" value="{csrf}">
-            <label>Current password <input type="password" name="current_password" autocomplete="current-password" required></label>
-            <label>New password <input type="password" name="new_password" autocomplete="new-password" minlength="14" required></label>
-            <label>Confirm new password <input type="password" name="confirm_password" autocomplete="new-password" minlength="14" required></label>
-            <button type="submit">Change password</button></form></section>'''
+            <p>Use at least 14 characters.</p><form class="form-grid" method="post" action="/admin/password">
+            <input type="hidden" name="csrf" value="{csrf}">{current}{new}{confirm}
+            <div class="form-actions"><button type="submit">Change password</button></div></form></section>'''
 
     def initial_password_page(csrf: str, message: str = "Choose a new password to unlock Admin.", status: int = 200) -> HTMLResponse:
         return show(f'<p role="status">{escape(message)}</p>{password_form(csrf)}', status)
 
-    def dashboard(csrf: str, message: str = "", status: int = 200, *, camera_selection: str | None = None,
-                  camera_error: CameraFormError | None = None, camera_saved: str = "",
+    def dashboard(csrf: str, message: str = "", status: int = 200, *, section: str = "axis-cameras",
+                  camera_selection: str | None = None, camera_error: CameraFormError | None = None, camera_saved: str = "",
                   csv_draft: dict | None = None, folder_result: str = "",
                   refresh_draft: dict | None = None, refresh_notice: str = "") -> HTMLResponse:
-        retention = store.retention()
-        counts, audit = store.admin_overview()
-        last = store.setting("retention_last_run")
-        changes = "".join(f'<li>{escape(entry["activity"])} · {timestamp(entry["at_ms"])}</li>' for entry in audit)
-        camera_rows = store.cameras()
-        if camera_error:
-            camera_selection = camera_error.camera_id
-        selected = next((row for row in camera_rows if row["id"] == camera_selection), None)
-        editor = ""
-        if selected is not None:
-            editor = camera_form(csrf, selected["id"], selected["mode"], selected["username"], error=camera_error)
-        elif camera_selection == "" or camera_error:
-            editor = camera_form(csrf, error=camera_error)
-        camera_notice = f'<p role="status">Saved camera {escape(camera_saved)}.</p>' if camera_saved else ""
+        if csv_draft is not None or folder_result:
+            section = "csv-reports"
+        elif refresh_draft is not None or refresh_notice:
+            section = "registered-vehicles"
+        elif camera_selection is not None or camera_error or camera_saved:
+            section = "axis-cameras"
+        section = section if section in SECTIONS and section != "alarms" else "axis-cameras"
         zone = store.setting("display_timezone") or str(display_zone)
-        refresh = registered_refresh_form(store, csrf, zone, draft=refresh_draft, notice=refresh_notice)
-        port_form = f'''<form method="post" action="/admin/web-port">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <label>Staff web port <input type="number" name="port" min="1" max="65535" value="{web_port}" required></label>
-            <p>Allow the new TCP port in your firewall before applying it.</p>
-            <button type="submit">Save port and restart</button></form>''' if restart and change_web_port else ""
-        restart_form = f'''<section><h3>Service</h3><form method="post" action="/admin/restart">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <label class="enable"><input type="checkbox" name="confirm" value="yes" required> Confirm restart</label>
-            <button type="submit">Restart PlateLog</button></form>{port_form}</section>''' if restart else ""
-        camera_port_form = f'''<form method="post" action="/admin/camera-port">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <label>Camera POST port <input type="number" name="port" min="1" max="65535" value="{camera_port or ''}" required></label>
-            <p>Allow this TCP port for the cameras in your firewall before applying a change.</p>
-            <button type="submit">Save camera port and restart</button></form>''' if restart and change_camera_port else ""
-        camera_port_status = (f"PlateLog listens for camera events on port {camera_port}." if camera_online else
-                              f"The camera listener is offline on port {camera_port}.")
-        camera_help = ("Use this port with the POST path shown for each camera." if change_camera_port else
-                       "In Docker, send events to the host's published camera port and the POST path shown for each camera.")
-        if pilot_camera_transport == "off":
-            camera_port_status = "The Axis camera listener is disabled."
-            camera_help = "Enable it at launch before connecting cameras."
-        elif pilot_camera_transport is not None:
-            camera_port_status = f"PlateLog listens for camera events over {pilot_camera_transport.upper()} on port {camera_port}."
-            camera_help = "Use this port with the POST path below."
-        access = register_access()
-        password_note = "Leave blank to keep the current staff password." if access["verifier"] else "Use at least 14 characters."
-        access_form = f'''<section id="register-access"><h3>Register access</h3>
-            <form method="post" action="/admin/register-access"><input type="hidden" name="csrf" value="{csrf}">
-            <label class="enable"><input type="checkbox" name="required" value="yes" {'checked' if access['required'] else ''}> Require staff sign-in to view the register</label>
-            <label>New staff password <input type="password" name="password" minlength="14" autocomplete="new-password"></label>
-            <button type="submit">Save register access</button></form>
-            <p>{password_note} The staff password opens the register. The administrator password opens both the register and Admin.</p></section>'''
-        return show(f'''<p><a href="/admin/alarms">Alarm rules</a></p>
-            <p class="notice" role="status">{escape(message)}</p>{access_form}{restart_form}
-            <section><h3>Display</h3><form method="post" action="/admin/timezone">
-            <input type="hidden" name="csrf" value="{csrf}">
-            <label>Time zone <input name="timezone" maxlength="128" value="{escape(zone)}" required></label>
-            <p>Use an IANA time zone such as Australia/Sydney.</p><button type="submit">Save time zone</button></form></section>
-            <section id="axis-cameras"><div class="camera-heading"><h3>Axis cameras</h3>
-            <a class="camera-add" href="/admin?camera=#camera-editor">Add camera</a></div>
-            <p>{camera_port_status} {camera_help}</p>{camera_port_form}{camera_notice}
-            {camera_table(camera_rows, camera_selection)}{editor}</section>
-            {registered_vehicles_form(csrf, store.registered_count(), refresh)}
-            <section><h3>Retention</h3>
-            <p>Cleanup runs at startup and hourly. Enabling it can permanently remove expired records and photos.</p>
-            <form method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
-            <label class="enable"><input type="checkbox" name="enabled" value="yes" {'checked' if retention['enabled'] else ''}>Enable automatic cleanup</label>
-            <label>Keep passages (days) <input type="number" name="passage_days" min="1" max="3650" value="{retention['passage_days']}" required></label>
-            <label>Keep photos (days) <input type="number" name="photo_days" min="1" max="3650" value="{retention['photo_days']}" required></label>
-            <button type="submit">Save settings</button></form>
-            <form method="post" action="/admin/purge"><input type="hidden" name="csrf" value="{csrf}">
-            <input type="hidden" name="passage_days" value="{retention['passage_days']}">
-            <input type="hidden" name="photo_days" value="{retention['photo_days']}">
-            <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
-            Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
-            <button type="submit">Purge now</button></form></section>
-            {csv_schedule_form(store, csrf, zone, draft=csv_draft, folder_result=folder_result)}{password_form(csrf)}
-            <section><h3>Storage</h3><dl><dt>Passages</dt><dd>{counts['passages']:,}</dd><dt>Photos</dt><dd>{counts['photos']:,}</dd>
-            <dt>Events</dt><dd>{counts['packets']:,}</dd>
-            <dt>Photo storage</dt><dd>{counts['photo_bytes'] / 1_048_576:.2f} MiB</dd>
-            <dt>Last cleanup (UTC)</dt><dd>{timestamp(int(last)) if last else 'None yet'}</dd></dl></section>
-            <section><h3>Recent admin activity (UTC)</h3>{f'<ul>{changes}</ul>' if changes else '<p>No activity yet.</p>'}</section>
-            <section><form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="{csrf}">
-            <button type="submit">Sign out</button></form></section>''', status)
+        content, actions = "", ""
+        if section == "axis-cameras":
+            rows = store.cameras()
+            if camera_error:
+                camera_selection = camera_error.camera_id
+            selected = next((row for row in rows if row["id"] == camera_selection), None)
+            editor = ""
+            if selected is not None:
+                editor = camera_form(csrf, selected["id"], selected["mode"], selected["username"], error=camera_error)
+            elif camera_selection == "" or camera_error:
+                editor = camera_form(csrf, error=camera_error)
+            message = f"Saved camera {camera_saved}." if camera_saved else message
+            listener = f"Camera listener: port {camera_port}." if camera_online else f"Camera listener offline on port {camera_port}."
+            if pilot_camera_transport == "off":
+                listener = "The Axis camera listener is disabled. Enable it at launch before connecting cameras."
+            elif pilot_camera_transport:
+                listener = f"Camera listener: {pilot_camera_transport.upper()} on port {camera_port}."
+            hint = help_tip("camera-post-path", "Camera POST path", "Combine the server address and camera listener port with the POST path in this table. Configure HTTP POST in AXIS License Plate Verifier. The source camera uses the authentication shown in its row.")
+            content = f'<p>{listener} {hint}</p>{camera_table(rows, camera_selection)}{editor}'
+            actions = '<a class="camera-add" href="/admin?section=axis-cameras&amp;camera=#camera-editor">Add camera</a>'
+        elif section == "registered-vehicles":
+            refresh = registered_refresh_form(store, csrf, zone, draft=refresh_draft, notice=refresh_notice)
+            content = registered_vehicles_form(csrf, store.registered_count(), refresh)
+        elif section == "audible-alerts":
+            content = audible_settings_form(csrf, store.audible_settings())
+        elif section == "csv-reports":
+            content = csv_schedule_form(store, csrf, zone, draft=csv_draft, folder_result=folder_result)
+        elif section == "access":
+            access = register_access()
+            note = "Leave blank to keep the current staff password." if access["verifier"] else "Use at least 14 characters."
+            staff = field("staff-password", "New staff password", '<input type="password" name="password" minlength="14" autocomplete="new-password">',
+                          "The staff password opens the plate log only. The administrator password opens the plate log and Admin. Leave this blank to keep the saved staff password.")
+            content = f'''<section id="register-access"><h3>Plate log access</h3><form class="form-grid" method="post" action="/admin/register-access">
+                <input type="hidden" name="csrf" value="{csrf}">
+                <label class="enable field-wide"><input type="checkbox" name="required" value="yes" {'checked' if access['required'] else ''}>
+                Require staff sign-in to view the plate log</label>{staff}<p class="form-note">{note}</p>
+                <div class="form-actions"><button type="submit">Save plate log access</button></div></form></section>{password_form(csrf)}'''
+        elif section == "retention":
+            retention = store.retention()
+            counts, _ = store.admin_overview()
+            last = store.setting("retention_last_run")
+            storage = ''.join(f'<div><dt>{name}</dt><dd>{value}</dd></div>' for name, value in (
+                ("Passages", f'{counts["passages"]:,}'), ("Photos", f'{counts["photos"]:,}'),
+                ("Events", f'{counts["packets"]:,}'), ("Photo storage", f'{counts["photo_bytes"] / 1_048_576:.2f} MiB')))
+            days = field("passage-days", "Keep passages (days)", f'<input type="number" name="passage_days" min="1" max="3650" value="{retention["passage_days"]}" required>',
+                         "Passages include the plate, time and event metadata. Default: 360 days. Cleanup permanently removes older passages.")
+            photos = field("photo-days", "Keep photos (days)", f'<input type="number" name="photo_days" min="1" max="3650" value="{retention["photo_days"]}" required>',
+                           "Default: 90 days. Photos may be removed before their passages. This cannot be longer than passage retention.")
+            content = f'''<section><h3>Storage</h3><dl class="storage-summary">{storage}</dl>
+                <p class="muted">Last cleanup (UTC): {timestamp(int(last)) if last else 'None yet'}</p></section>
+                <section><h3>Automatic cleanup</h3><p>Runs at startup and hourly. Expired passages and photos are permanently removed.</p>
+                <form class="form-grid" method="post" action="/admin/settings"><input type="hidden" name="csrf" value="{csrf}">
+                <label class="enable field-wide"><input type="checkbox" name="enabled" value="yes" {'checked' if retention['enabled'] else ''}>Enable automatic cleanup</label>
+                {days}{photos}<div class="form-actions"><button type="submit">Save retention settings</button></div></form></section>
+                <section class="danger-zone"><h3>Purge expired data now</h3><p>Uses the saved retention limits. This cannot be undone in PlateLog.</p>
+                <form method="post" action="/admin/purge"><input type="hidden" name="csrf" value="{csrf}">
+                <input type="hidden" name="passage_days" value="{retention['passage_days']}"><input type="hidden" name="photo_days" value="{retention['photo_days']}">
+                <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
+                Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
+                <button class="danger" type="submit">Purge now</button></form></section>'''
+        elif section == "system":
+            timezone_field = field("timezone", "Time zone", f'<input name="timezone" maxlength="128" value="{escape(zone)}" required>',
+                                   "Use an IANA time zone, such as Australia/Sydney. This controls displayed times and daily schedules. It does not change the Windows or camera clock.")
+            history_field = field("history-days", "Unregistered history (days)",
+                                  f'<input type="number" name="days" min="1" max="3650" value="{store.unregistered_history_days()}" required>',
+                                  "Default: 30 days. For currently unregistered vehicles, History shows earlier unregistered passages across all cameras in the rolling window ending at that read, excluding the current passage. Registered vehicles show a dash. Later CSV imports do not rewrite the recorded status. Counts use retained passage records, independently of photo retention.")
+            content = f'''<section><h3>Display</h3><form class="form-grid" method="post" action="/admin/timezone">
+                <input type="hidden" name="csrf" value="{csrf}">{timezone_field}
+                <div class="form-actions"><button type="submit">Save time zone</button></div></form>
+                <form class="form-grid" method="post" action="/admin/unregistered-history"><input type="hidden" name="csrf" value="{csrf}">
+                {history_field}<div class="form-actions"><button type="submit">Save history window</button></div></form>
+                <p class="muted">Passage retention is currently {store.retention()['passage_days']} days. Earlier records without a saved classification are shown as unknown.</p></section>
+                <section><h3>Listener ports</h3><p>Staff web: <strong>{web_port}</strong> · Camera POST: <strong>{camera_port or 'Disabled'}</strong></p>'''
+            for kind, port, change, endpoint, label in (
+                    ("staff", web_port, change_web_port, "web-port", "Staff web port"),
+                    ("camera", camera_port, change_camera_port, "camera-port", "Camera POST port")):
+                if restart and change:
+                    port_field = field(f"{kind}-port", label, f'<input type="number" name="port" min="1" max="65535" value="{port or ""}" required>',
+                                       "Allow the new TCP port in the firewall before applying it. Staff and camera ports must differ. Changing this restarts PlateLog and ends browser sessions.")
+                    content += f'''<form class="form-grid" method="post" action="/admin/{endpoint}"><input type="hidden" name="csrf" value="{csrf}">
+                        {port_field}<div class="form-actions"><button type="submit">Save {kind} port and restart</button></div></form>'''
+            if not restart:
+                content += '<p class="muted">Ports and restart are managed by the server deployment configuration.</p>'
+            content += '</section>'
+            if restart:
+                content += f'''<section><h3>Service</h3><p>Restart interrupts live updates briefly and ends browser sessions.</p>
+                    <form method="post" action="/admin/restart"><input type="hidden" name="csrf" value="{csrf}">
+                    <label class="enable"><input type="checkbox" name="confirm" value="yes" required>Confirm restart</label>
+                    <button class="secondary" type="submit">Restart PlateLog</button></form></section>'''
+            _, audit = store.admin_overview()
+            changes = ''.join(f'<li>{escape(entry["activity"])}<time>{timestamp(entry["at_ms"])}</time></li>' for entry in audit)
+            content += f'<section><h3>Recent admin activity (UTC)</h3>{f"<ul class=activity-list>{changes}</ul>" if changes else "<p>No activity yet.</p>"}</section>'
+        shell = admin_shell(section, content, csrf, message=message, error=status >= 400, actions=actions)
+        return HTMLResponse(page("Admin", shell), status_code=status)
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request, saved: bool = False, password_changed: bool = False, csv_saved: bool = False,
               access_saved: bool = False, camera: str | None = None, camera_saved: str = "",
-              refresh_saved: bool = False):
+              refresh_saved: bool = False, sounds_saved: bool = False, section: str = ""):
         if not persistent:
             return show("<p>Admin needs a persistent data directory and a password set on the server.</p>")
         if not transport_ok(request):
@@ -1100,10 +1189,13 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if csrf:
             if current.startswith(INITIAL_ADMIN_PREFIX):
                 return initial_password_page(csrf)
-            message = ("Register access saved." if access_saved else "CSV schedule saved." if csv_saved else
-                       "Retention settings saved." if saved else "")
+            message = ("Plate log access saved." if access_saved else "CSV schedule saved." if csv_saved else
+                       "Retention settings saved." if saved else "Sound settings saved." if sounds_saved else "")
             refresh_notice = "Refresh schedule saved." if refresh_saved else ""
-            return dashboard(csrf, message, camera_selection=camera, camera_saved=camera_saved,
+            active = section or ("access" if access_saved else "csv-reports" if csv_saved else
+                                 "retention" if saved else "audible-alerts" if sounds_saved else
+                                 "registered-vehicles" if refresh_saved else "axis-cameras")
+            return dashboard(csrf, message, section=active, camera_selection=camera, camera_saved=camera_saved,
                              refresh_notice=refresh_notice)
         return login_page("Password changed. Sign in with your new password." if password_changed else "")
 
@@ -1136,31 +1228,35 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return csrf, fields
 
     def alarm_page(csrf: str, selected: str | None, *, draft: dict[str, str] | None = None,
-                   message: str = "", status: int = 200) -> HTMLResponse:
+                   message: str = "", status: int = 200, view: str = "rules", smtp_draft: dict | None = None) -> HTMLResponse:
         cameras = store.cameras()
         rules, recent = store.alarm_overview()
         stored_zone = store.setting("display_timezone")
         zone = ZoneInfo(stored_zone) if stored_zone else display_zone
-        notice = f'<p class="notice" role="status">{escape(message)}</p>' if message else ""
         add = ('<a class="camera-add" href="/admin/alarms?camera=#alarm-editor">Add rule</a>'
-               if rules and len(rules) < len(cameras) else "")
-        content = f'''<div class="admin alarm-admin"><p><a href="/admin">Back to Admin</a></p>
-            <div class="camera-heading"><h2>Alarm rules</h2>{add}</div>
-            <p>Paste the destination device's timed VAPIX URL. Log only records matches without contacting the device.</p>{notice}
-            {alarm_table(csrf, cameras, rules, selected, draft)}
-            <section><h3>Recent alarm activity</h3>{alarm_activity(recent, zone)}</section></div>'''
-        return HTMLResponse(page("Alarm rules", content), status_code=status)
+               if view != "smtp" and rules and len(rules) < len(cameras) else "")
+        content = f'''<nav class="subtabs" aria-label="Alarm settings">
+            <a href="/admin/alarms"{' aria-current="page"' if view != 'smtp' else ''}>Rules</a>
+            <a href="/admin/alarms?view=smtp"{' aria-current="page"' if view == 'smtp' else ''}>Email delivery (SMTP)</a></nav>'''
+        if view == "smtp":
+            content += smtp_form(csrf, smtp_draft if smtp_draft is not None else store.smtp_settings())
+        else:
+            content += alarm_table(csrf, cameras, rules, selected, draft)
+            content += f'<section><h3>Recent delivery activity</h3>{alarm_activity(recent, zone)}</section>'
+        shell = admin_shell("alarms", content, csrf, message=message, error=status >= 400, actions=add)
+        return HTMLResponse(page("Alarm rules", shell), status_code=status)
 
     @app.get("/admin/alarms", response_class=HTMLResponse)
-    def alarms(request: Request, camera: str | None = None, saved: bool = False):
+    def alarms(request: Request, camera: str | None = None, saved: bool = False, view: str = "rules", smtp_saved: bool = False):
         csrf = admin_csrf(request)
         if not csrf:
             return RedirectResponse("/admin", status_code=303)
-        return alarm_page(csrf, camera, message="Alarm rule saved." if saved else "")
+        return alarm_page(csrf, camera, view=view,
+                          message="SMTP settings saved." if smtp_saved else "Alarm rule saved." if saved else "")
 
     @app.post("/admin/alarms")
     async def save_alarm(request: Request):
-        csrf, fields = await authorized_form(request)
+        csrf, fields = await authorized_form(request, limit=12_288)
         camera = fields.get("camera", "")
         try:
             rule = parse_rule(fields)
@@ -1174,6 +1270,23 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return RedirectResponse("/admin/alarms?" + urlencode({"camera": camera, "saved": "true"}) + "#alarm-editor",
                                 status_code=303)
 
+    @app.post("/admin/smtp")
+    async def save_smtp(request: Request):
+        csrf, fields = await authorized_form(request, limit=8192)
+        try:
+            config = parse_smtp_settings(fields)
+        except ValueError as exc:
+            draft = {**DEFAULT_SMTP, **{key: fields[key] for key in DEFAULT_SMTP if key in fields}}
+            if not draft["secret_name"].startswith(SMTP_SECRET_PREFIX):
+                draft["secret_name"] = ""
+            return alarm_page(csrf, None, view="smtp", smtp_draft=draft, message=str(exc), status=400)
+        if fields.get("test_connection") == "yes":
+            result, detail = await run_in_threadpool(test_smtp_connection, config)
+            return alarm_page(csrf, None, view="smtp", smtp_draft=config, message=detail,
+                              status=200 if result == "accepted" else 400)
+        await run_in_threadpool(store.save_smtp_settings, config)
+        return RedirectResponse("/admin/alarms?view=smtp&smtp_saved=true", status_code=303)
+
     @app.get("/admin/registered-vehicles/template.csv")
     def registration_template(request: Request):
         if not admin_csrf(request):
@@ -1181,8 +1294,39 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         return Response("Plate\r\n", media_type="text/csv",
                         headers={"Content-Disposition": 'attachment; filename="platelog-registered-plates.csv"'})
 
+    @app.get("/admin/import-review", response_class=HTMLResponse)
+    def registration_review(request: Request, run: str | None = Query(None, pattern=r"^[a-f0-9]{32}$"),
+                            number: int = Query(1, alias="page", ge=1)):
+        csrf = admin_csrf(request)
+        if not csrf:
+            return RedirectResponse("/admin", status_code=303)
+        saved_zone = store.setting("display_timezone")
+        zone = ZoneInfo(saved_zone) if saved_zone else display_zone
+        try:
+            content = review_content(store, run, number, zone)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        shell = admin_shell("registered-vehicles", content, csrf, heading="Skipped entries",
+                            description="Review entries that could not be added to the registered list.",
+                            actions='<a href="/admin?section=registered-vehicles">Back to list</a>')
+        return HTMLResponse(page("Skipped entries", shell))
+
+    @app.get("/admin/import-review/{run_id}/skipped.csv")
+    def registration_review_csv(request: Request, run_id: str):
+        if not admin_csrf(request):
+            raise HTTPException(403, "Sign in as administrator.")
+        if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+            raise HTTPException(404, "Import not found.")
+        try:
+            content = skipped_csv(store, run_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return Response(content, media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="platelog-skipped-{run_id}.csv"'})
+
     @app.post("/admin/registered-vehicles/{action}")
-    async def import_registrations(request: Request, action: str, mode: str, file_type: str = Query(alias="format")):
+    async def import_registrations(request: Request, action: str, mode: str, file_type: str = Query(alias="format"),
+                                   filename: str = Query("Manual upload", max_length=255)):
         require_form_origin(request)
         csrf = admin_csrf(request)
         if not csrf:
@@ -1216,12 +1360,18 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             expected = match[1]
 
         def process_import():
-            plates, duplicates = parse_plates(bytes(body), file_type)
-            result = store.registration_import(plates, replacing, expected)
+            source = filename.replace("\\", "/").rsplit("/", 1)[-1] or "Manual upload"
+            try:
+                imported = parse_plate_import(bytes(body), file_type)
+            except ValueError as exc:
+                store.record_registration_failure(source, mode, str(exc), getattr(exc, "imported", None))
+                raise
+            result = store.registration_import(imported.plates, replacing, expected, imported=imported, source=source)
+            result["import_report"] = imported.report()
             revision = result.pop("revision")
             if not applying:
                 result["receipt"] = f"{revision}.{signature(revision)}"
-                result["duplicates"] = duplicates
+                result["duplicates"] = imported.duplicates
             return result
 
         try:
@@ -1240,8 +1390,17 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             verifier = await run_in_threadpool(password_verifier, password) if password else ""
             await run_in_threadpool(store.set_register_access, required, verifier)
         except ValueError as exc:
-            return dashboard(csrf, str(exc), 400)
+            return dashboard(csrf, str(exc), 400, section="access")
         return RedirectResponse("/admin?access_saved=true#register-access", status_code=303)
+
+    @app.post("/admin/audible-alerts")
+    async def save_audible_alerts(request: Request):
+        csrf, fields = await authorized_form(request)
+        if any(fields.get(key, "") not in {"", "yes"} for key in ("registered", "unregistered")):
+            return dashboard(csrf, "Choose which vehicle sounds to enable.", 400, section="audible-alerts")
+        settings = {key: fields.get(key) == "yes" for key in ("registered", "unregistered")}
+        await run_in_threadpool(store.set_setting, "audible_alerts", json.dumps(settings), "Audible alert settings saved")
+        return RedirectResponse("/admin?sounds_saved=true#audible-alerts", status_code=303)
 
     @app.post("/admin/settings")
     async def save_retention(request: Request):
@@ -1251,7 +1410,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             if not 1 <= days["photo_days"] <= days["passage_days"] <= 3650:
                 raise ValueError
         except (KeyError, ValueError):
-            return dashboard(csrf, "Enter 1–3650 days. Photo retention must be no longer than passage retention.", 400)
+            return dashboard(csrf, "Enter 1–3650 days. Photo retention must be no longer than passage retention.", 400, section="retention")
         enabled = fields.get("enabled") == "yes"
         settings = json.dumps({"enabled": enabled, **days})
         activity = f"Retention saved: {days['passage_days']} days for passages, {days['photo_days']} for photos, cleanup {'on' if enabled else 'off'}"
@@ -1273,12 +1432,12 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             return dashboard(csrf, csv_draft=draft,
                              folder_result=f"Folder test passed for {folder}. PlateLog wrote, read, and removed a test file.")
         if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", run_time):
-            return dashboard(csrf, "Enter a run time between 00:00 and 23:59.", 400)
+            return dashboard(csrf, "Enter a run time between 00:00 and 23:59.", 400, section="csv-reports")
         if enabled or folder:
             try:
                 folder = str(report_folder(folder))
             except ValueError as exc:
-                return dashboard(csrf, str(exc), 400)
+                return dashboard(csrf, str(exc), 400, section="csv-reports")
         schedule = json.dumps({"enabled": enabled, "run_time": run_time, "folder": folder})
         activity = "Daily CSV schedule enabled" if enabled else "Daily CSV schedule disabled"
         await run_in_threadpool(store.set_setting, "daily_csv_schedule", schedule, activity)
@@ -1301,16 +1460,16 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
     async def purge(request: Request):
         csrf, fields = await authorized_form(request)
         if fields.get("confirm") != "yes":
-            return dashboard(csrf, "Confirm permanent deletion first.", 400)
+            return dashboard(csrf, "Confirm permanent deletion first.", 400, section="retention")
         try:
             limits = int(fields.get("passage_days", "")), int(fields.get("photo_days", ""))
         except ValueError:
-            return dashboard(csrf, "Review the saved age limits first.", 400)
+            return dashboard(csrf, "Review the saved age limits first.", 400, section="retention")
         try:
             passages, photos = await run_in_threadpool(store.apply_retention, confirmed_limits=limits)
         except ValueError as exc:
-            return dashboard(csrf, str(exc), 409)
-        return dashboard(csrf, f"Purged {passages} passages and {photos} photos.")
+            return dashboard(csrf, str(exc), 409, section="retention")
+        return dashboard(csrf, f"Purged {passages} passages and {photos} photos.", section="retention")
 
     @app.post("/admin/cameras")
     async def save_camera(request: Request):
@@ -1347,9 +1506,21 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 raise ValueError
             ZoneInfo(name)
         except (ValueError, ZoneInfoNotFoundError):
-            return dashboard(csrf, "Enter a valid IANA time zone, such as Australia/Sydney.", 400)
+            return dashboard(csrf, "Enter a valid IANA time zone, such as Australia/Sydney.", 400, section="system")
         await run_in_threadpool(store.set_setting, "display_timezone", name, f"Display time zone changed to {name}")
-        return dashboard(csrf, "Time zone saved.")
+        return dashboard(csrf, "Time zone saved.", section="system")
+
+    @app.post("/admin/unregistered-history")
+    async def save_unregistered_history(request: Request):
+        csrf, fields = await authorized_form(request)
+        try:
+            value = fields.get("days", "")
+            if not re.fullmatch(r"[0-9]{1,4}", value):
+                raise ValueError("Enter a history window from 1 to 3650 days.")
+            await run_in_threadpool(store.set_unregistered_history_days, int(value))
+        except ValueError as exc:
+            return dashboard(csrf, str(exc), 400, section="system")
+        return dashboard(csrf, "Unregistered history window saved.", section="system")
 
     @app.post("/admin/logout")
     async def logout(request: Request):
@@ -1365,7 +1536,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         csrf, fields = await authorized_form(request, limit=10_240, allow_initial=True)
         if not current or current != credential(request):
             raise HTTPException(403, "Sign in again to change the password.")
-        render = initial_password_page if current.startswith(INITIAL_ADMIN_PREFIX) else dashboard
+        render = initial_password_page if current.startswith(INITIAL_ADMIN_PREFIX) else lambda token, message, code: dashboard(token, message, code, section="access")
         value = fields.get("new_password", "")
         if value != fields.get("confirm_password"):
             return render(csrf, "The new passwords did not match.", 400)
@@ -1397,7 +1568,7 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
         if not restart or restarting:
             raise HTTPException(409, "PlateLog cannot accept a restart request right now.")
         if fields.get("confirm") != "yes":
-            return dashboard(csrf, "Confirm the restart first.", 400)
+            return dashboard(csrf, "Confirm the restart first.", 400, section="system")
         restarting = True
         try:
             await run_in_threadpool(store.record_admin_activity, "PlateLog restart requested")
@@ -1414,19 +1585,19 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             raise HTTPException(409, f"The {name} port cannot be changed right now.")
         port_text = fields.get("port", "")
         if not re.fullmatch(r"[0-9]{1,5}", port_text) or not 1 <= int(port_text) <= 65535:
-            return dashboard(csrf, "Enter a TCP port from 1 to 65535.", 400)
+            return dashboard(csrf, "Enter a TCP port from 1 to 65535.", 400, section="system")
         port = int(port_text)
         if port == current_port:
-            return dashboard(csrf, "PlateLog is already using this port.")
+            return dashboard(csrf, "PlateLog is already using this port.", section="system")
         if port == other_port:
-            return dashboard(csrf, "The staff web and camera POST ports must be different.", 409)
+            return dashboard(csrf, "The staff web and camera POST ports must be different.", 409, section="system")
         destination = str(request.url.replace(port=port, path="/admin", query="")) if move_admin else "/admin"
         restarting = True
         try:
             await run_in_threadpool(change_port, port)
         except OSError:
             restarting = False
-            return dashboard(csrf, "PlateLog could not open that port. Choose another port.", 409)
+            return dashboard(csrf, "PlateLog could not open that port. Choose another port.", 409, section="system")
         except Exception:
             restarting = False
             raise
@@ -1489,7 +1660,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
     async def supervise_alarms():
         while True:
             try:
-                await run_in_threadpool(run_due_alarms, store)
+                await run_in_threadpool(run_due_alarms, store, display_zone=str(display_zone))
             except Exception:
                 LOG.exception("PlateLog alarm processing failed")
             await asyncio.sleep(0.5)
@@ -1529,11 +1700,19 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     @app.get("/preview.css")
     def stylesheet():
-        return Response(CSS, media_type="text/css")
+        return Response(CSS + ADMIN_CSS, media_type="text/css")
+
+    @app.get("/admin.js")
+    def admin_script():
+        return Response(ADMIN_JS, media_type="text/javascript")
 
     @app.get("/preview.js")
     def browser_script():
         return Response(JS, media_type="text/javascript")
+
+    @app.get("/audible.js")
+    def audible_script():
+        return Response(AUDIBLE_JS, media_type="text/javascript")
 
     def register_zone() -> timezone | ZoneInfo:
         saved_zone = store.setting("display_timezone") if persistent else None
@@ -1572,6 +1751,11 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         last_read = store.last_received_ms()
         return {"server_ms": time.time_ns() // 1_000_000, "last_read_ms": last_read, "zone": str(register_zone())}
 
+    @app.get("/register/audible-alerts", dependencies=signed_in)
+    def audible_events(since: int | None = Query(None, ge=0, le=253402300799999),
+                       camera: str = Query("", max_length=128)):
+        return store.audible_events(since, camera)
+
     @app.get("/register/stats", response_class=HTMLResponse, dependencies=signed_in)
     def register_stats(camera: str = Query("", max_length=128)):
         return render_stats(store, time.time_ns() // 1_000_000, camera, register_zone())
@@ -1590,13 +1774,13 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             <button type="submit" formaction="/register/export" data-export name="photos" value="false">Excel without photos</button>
             <a href="/" data-clear-search>Clear</a></form>'''
         toggles = "".join(f'<label><input type="checkbox" id="show-{key}" data-column-toggle="{key}" checked> {key.title()}</label>'
-                          for key in VEHICLE_COLUMNS)
+                          for key in ("history", *VEHICLE_COLUMNS))
         toolbar = f'<div class="toolbar">{controls}<fieldset><legend>Columns</legend>{toggles}</fieldset></div>'
         activity = render_stats(store, time.time_ns() // 1_000_000, filters.camera, filters.zone)
         stats = f'''<section class="register-stats" aria-labelledby="stats-heading">
             <h2 id="stats-heading">Vehicle activity · Last 24 hours</h2>
             <div id="register-stats-content">{activity}</div></section>'''
-        return register_page(request, "Register", register_sign_out_form(request) + stats + toolbar +
+        return register_page(request, "Plate log", register_sign_out_form(request) + REGISTER_CONTROL + stats + toolbar +
                              '<p id="search-status" role="status"></p>' +
                              f'<div id="register-results">{render_results(filters, page)}</div>',
                              header_extra=clock_header(filters.zone))
@@ -1628,6 +1812,9 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
                                               start_ms=filters.start_ms, end_ms=filters.end_ms)
         if not rows:
             return '<div data-register-page="1"><p class="register-live muted">Live updates</p><p role="status">No matching passages.</p></div>'
+        history_days = rows[0]["history_days"]
+        history_help = help_tip("unregistered-history", "Previous unregistered passes",
+            f"Shown only for currently unregistered vehicles. Counts earlier unregistered passages for this plate across all cameras in the {history_days} days ending at this row's read time, excluding this passage. Zero means no confirmed earlier unregistered passage in that window. A dash on a registered vehicle means history is hidden. Unknown means no reliable historical classification. Counts use retained passage records; later CSV imports do not rewrite the recorded status. Hide this column using the History checkbox.")
         first = (page - 1) * REGISTER_PAGE_SIZE + 1
         last = (total + REGISTER_PAGE_SIZE - 1) // REGISTER_PAGE_SIZE
         caption = f"Showing {first}–{first + len(rows) - 1} of {total:,} passages · {escape(str(filters.zone))}"
@@ -1650,13 +1837,25 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             time = capture.strftime("%H:%M:%S")
             cells = "".join(f'<td data-column="{key}">{escape(row[key]) if row[key] else "—"}</td>'
                             for key in VEHICLE_COLUMNS)
+            count, unknown = row["unregistered_passes"], row["history_unknown"]
+            recorded = "Unknown" if row["registered_at_read"] is None else "Registered" if row["registered_at_read"] else "Unregistered"
+            if row["registered"]:
+                history_cell = '<td class="passage-history muted" data-column="history" title="Currently registered; unregistered history is hidden.">—</td>'
+            else:
+                history_title = escape(f"{count} confirmed previous unregistered passages in {history_days} days before this read; this passage is excluded. "
+                                       f"{unknown} earlier passages have unknown historical status.")
+                history_cell = (f'<td class="passage-history" data-column="history" data-unregistered-count="{count}" data-history-unknown="{unknown}" title="{history_title}">'
+                                f'<strong>{count if count or not unknown else "—"}</strong>'
+                                f'{f"<span class=history-unknown>{unknown} unknown</span>" if unknown else ""}</td>')
             result.append(f'''<tr data-registered="{registered}"><td>{photo}</td>
-                <td class="registration"><a href="{link}">{plate_text}</a><span class="registration-status">{registration}</span></td>
-                <td>{date}</td><td><time datetime="{capture.isoformat()}" title="{capture.strftime('%Z %z')}">{time}</time></td>{cells}</tr>''')
+                <td class="registration"><a href="{link}">{plate_text}</a><span class="registration-status" title="Current list status. At first receipt: {recorded}.">{registration}</span></td>
+                {history_cell}<td>{date}</td><td><time datetime="{capture.isoformat()}" title="{capture.strftime('%Z %z')}">{time}</time></td>{cells}</tr>''')
         headings = "".join(f'<th scope="col" data-column="{key}">{key.title()}</th>' for key in VEHICLE_COLUMNS)
         return f'''<div data-register-page="{page}">{top}<p id="register-summary" class="muted">{caption}</p>
             <div class="scroll"><table aria-labelledby="register-summary">
-            <thead><tr><th scope="col">Image</th><th scope="col">Reg</th><th scope="col">Date</th><th scope="col">Time</th>{headings}</tr></thead>
+            <thead><tr><th scope="col">Image</th><th scope="col">Reg</th>
+            <th scope="col" class="history-heading" data-column="history"><span class="history-label">Previous unregistered<span class="history-window">passes · {history_days} days</span></span> {history_help}</th>
+            <th scope="col">Date</th><th scope="col">Time</th>{headings}</tr></thead>
             <tbody>{"".join(result)}</tbody></table></div>{bottom}</div>'''
 
     @app.get("/register/results", response_class=HTMLResponse, dependencies=signed_in)
@@ -1669,7 +1868,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         def reject(message: str, *, photo_fallback: bool = False, busy: bool = False) -> HTMLResponse:
             params = filter_params(filters)
             back = "/?" + escape(urlencode(params)) if params else "/"
-            links = f'<a href="{back}">Back to filtered register</a>'
+            links = f'<a href="{back}">Back to filtered plate log</a>'
             if photo_fallback:
                 no_photos = escape(urlencode({**params, "photos": "false"}))
                 links = f'<a href="/register/export?{no_photos}">Export without photos</a> · ' + links

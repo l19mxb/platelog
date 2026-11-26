@@ -1,6 +1,6 @@
 # PlateLog
 
-PlateLog is a prototype for a local Axis licence plate register. A persistent instance receives Axis HTTP POST events and provides live plate search, vehicle photos, Excel exports and scheduled CSV reports. The [technical design notes](technical-spec.md) describe the architecture and proposed features.
+PlateLog is a prototype for a local Axis licence plate log. A persistent instance receives Axis HTTP POST events and provides live plate search, vehicle photos, Excel exports and scheduled CSV reports. The [technical design notes](technical-spec.md) describe the architecture and proposed features.
 
 ## Offline Windows Server pilot
 
@@ -19,11 +19,11 @@ Use the site's managed certificate policy. Run the [staff PC check](IT-COMMANDS.
 
 The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings.
 
-![PlateLog register with a 24-hour line graph, total vehicle passes, unregistered vehicles, and a synthetic L19MXB passage](docs/images/register.png)
+![Plate log with a 24-hour line graph, optional unregistered history and synthetic registered and unregistered vehicles](docs/images/register.png)
 
-Typing `AO1` finds the corrected plate `DEMO-A01` by its original camera read.
+Typing filters the plate log after every keystroke. This synthetic example searches for `L19` and shows the registered `L19MXB` vehicle.
 
-![PlateLog register filtered to the corrected plate](docs/images/register-search.png)
+![Plate log filtered to the registered L19MXB demo vehicle](docs/images/register-search.png)
 
 One of the simulated camera captures features `L19MXB`, a nod to PlateLog’s creator.
 
@@ -137,11 +137,49 @@ Sign in to **Admin** on TCP `8765` with the initial password `admin`, then set a
 
 ## Admin
 
-Under **Registered vehicles**, use **Download CSV template** for the required `Plate` heading. Upload a UTF-8 CSV or an `.xlsx` file with that heading on the first worksheet. Format the Excel column as Text before entering plates so leading zeros are preserved. **Preview import** shows additions, existing plates, duplicate rows, and any removals. Select **Add to existing list** to keep plates missing from the file, or **Replace entire list** to remove them. Apply the preview after reviewing the changes. Each file can contain up to 25,000 plate rows and be up to 4 MiB.
+Under **Registered vehicles**, upload a UTF-8 CSV or an `.xlsx` file using the first worksheet. Use **Download CSV template** for a simple `Plate` column with one registration per row. Cardholder exports can instead use `Vehicle` and `Cardholder Authorised` columns. Format Excel registrations as Text before entering them so leading zeros are preserved. **Preview import** shows additions, existing plates, duplicates, and any removals. Select **Add to existing list** to keep plates missing from the file, or **Replace entire list** to remove them. Apply the preview after reviewing the changes. Each file can contain up to 25,000 rows and registration entries and be up to 4 MiB.
 
-Use **Scheduled list refresh** to replace the list daily from a CSV with the same heading. Set the refresh time in the register's time zone and enter the full source file path on the server or a Windows UNC share. Give the PlateLog service account read access and have the source system publish the finished CSV before the scheduled time, for example by writing a temporary file and renaming it when complete. PlateLog attempts the refresh once per day. It can catch up after a restart on the same day. If the file is missing, unreadable, empty, or invalid, PlateLog keeps the current list and shows the failure alongside the last successful refresh in Admin.
+For cardholder exports, `Cardholder Authorised` must contain `Yes` or `No`. Only `Yes` rows supply registered plates. Split the `Vehicle` field at commas, remove whitespace from each entry, and convert letters to uppercase. For example, `L19 MXB, ABC 123` supplies `L19MXB` and `ABC123`. Fields containing commas must be quoted in the CSV:
 
-### VAPIX alarm rules
+```csv
+Vehicle,Cardholder Authorised
+"L19 MXB, ABC 123",Yes
+XYZ789,No
+```
+
+Other cardholder columns are ignored. A plate listed under both statuses is registered if at least one `Yes` row contains it. Duplicate registrations are counted once. Blank entries and entries containing punctuation are skipped, with counts and the first 20 affected row numbers shown for review. Only commas separate registrations. Missing commas can leave a real vehicle appearing unregistered until the source is corrected. PlateLog does not guess where one registration ends and another starts.
+
+Open **Admin → Registered vehicles → Skipped entries** for the full review after an import. Select a manual upload or scheduled refresh to see its source file, time, result, and every skipped entry with the source row number, original `Vehicle` value, and reason. Results are paginated at 50 entries per page. **Download skipped rows CSV** includes the full original values and reasons, with one row per affected source row. Fix those records in the source system and import the corrected file. The latest 30 runs are retained across restarts, including rejected uploads and failed scheduled refreshes. A failed import keeps the registered list. Detailed skipped values from imports before this update are unavailable.
+
+Use **Scheduled list refresh** to replace the list daily from either CSV format above. Set the refresh time in the plate log's time zone and enter the full source file path on the server or a Windows UNC share. Give the PlateLog service account read access and have the source system publish the finished CSV before the scheduled time, for example by writing a temporary file and renaming it when complete. PlateLog attempts the refresh once per day. It can catch up after a restart on the same day. Admin shows the last successful refresh and any skipped-entry counts and row numbers. If the file is missing, unreadable, has invalid headings or authorisation values, or supplies no valid authorised registrations, PlateLog keeps the current list. The simple `Plate` format also keeps the current list if any plate row is invalid. A successful replacement removes registrations absent from the new authorised list. Reports and dashboard counts use the current list.
+
+### Unregistered passage history
+
+The **Plate log** shows **Previous unregistered passes** for vehicles missing from the current registered list. Registered vehicles show a dash, so their normal visits do not appear as an unregistered count. Use the **History** checkbox beside Make, Model and Colour to show or hide the column; each browser remembers that choice. The default window is **30 days**; change it in **Admin → System → Display → Unregistered history (days)**, for example to 90 days.
+
+Each row counts earlier unregistered passages for that plate across all cameras in the rolling window ending at that read, excluding the current passage. A first unregistered visit shows **0**; the next shows **1**. Duplicate payloads and camera updates do not add another passage. Classification is saved against the vehicle list at first receipt; OCR corrections use that same list version. A later CSV import does not rewrite those classifications. Once a vehicle is registered, its history count is hidden on every row. If it is removed from the list later, earlier unregistered visits still count while they remain in the window; registered visits never contribute.
+
+Older passages without a recorded classification, ambiguous passages and reads received before a vehicle list was available are **unknown**. The column shows unknown counts separately and uses a dash when it cannot confirm any unregistered history. It does not guess historical status from today's list. Counts use retained passage records, so photo expiry does not remove them. Hover, focus or tap the column's help button for the counting rules.
+
+### Audible alerts
+
+In **Admin → Audible alerts**, enable the success chime for registered vehicles and the alert chime for unregistered vehicles. Both start off. Use **Test success sound** and **Test alert sound** to check the workstation's audio.
+
+The success chime uses two soft notes. The unregistered alert uses four short, sharper alternating buzzer pulses to attract attention at the gatehouse. Each alert lasts about half a second and plays once per new passage.
+
+On the plate log, click **Enable sound** once per tab. Sounds use the registered vehicle list and the selected Camera filter. Keep the plate log tab visible to hear new reads. PlateLog waits two seconds for camera corrections, and replaying a passage keeps one audible notification. Returning to the tab or reconnecting starts with new reads.
+
+### Alarm rules: VAPIX and SMTP
+
+Admin uses separate sections for cameras, registered vehicles, alarm rules, sounds, reports, retention, access and system settings. Select a section in the sidebar, or the **Settings section** menu on a narrow screen. Question-mark buttons explain fields on hover, keyboard focus or tap; press **Escape** to dismiss help. Save and validation messages remain in the section being edited.
+
+In **Admin → Alarm rules**, each camera rule can run **VAPIX**, **Email (SMTP)**, or **VAPIX + Email**. The trigger remains **Registered** or **Unregistered**. Existing rules retain VAPIX as their action after an upgrade.
+
+For email, open **Email delivery (SMTP)** and configure the server, port, TLS mode and approved sender address. **STARTTLS** is the default; implicit TLS is also supported. An IP-authorised internal relay can use **None** without password authentication. Supply optional SMTP credentials through a service environment variable named `PLATELOG_SMTP_PASSWORD_…`; enter its name in Admin. TLS certificates are verified. **Test connection** checks the entered settings without saving or sending email. Python's standard SMTP library provides delivery; there are no additional dependencies. [Python SMTP documentation](https://docs.python.org/3/library/smtplib.html)
+
+Set up to ten comma-separated recipient addresses and a subject in each email rule. The subject supports `{plate}`, `{camera}` and `{status}`. Emails contain the plate, source camera, classification, capture and receipt times with UTC offsets, time zone and passage ID. Photos are not attached. **Accepted** means the SMTP server accepted the message; it does not prove inbox delivery. Partial recipient acceptance and timeouts are recorded without automatic retries. Combined rules record each action's result independently. SMTP settings changes hold pending email actions; new passages use the saved settings.
+
+#### VAPIX action
 
 In **Admin → Alarm rules**, select a source camera, choose **Registered** or **Unregistered**, and paste the timed HTTPS virtual-input URL for the destination device. Use one rule per source camera. The destination can be an Axis camera, relay module, or other device that supports timed virtual inputs. Map the virtual input to an action on that device. This example activates virtual input 2 for one second on an A9210 that drives a relay. [Axis event rules](https://help.axis.com/en-us/get-started-with-rules-for-events) · [VAPIX virtual inputs](https://developer.axis.com/vapix/network-video/input-and-outputs/#virtual-input-api)
 
@@ -149,9 +187,9 @@ In **Admin → Alarm rules**, select a source camera, choose **Registered** or *
 https://a9210.example.internal/axis-cgi/virtualinput/activate.cgi?schemaversion=1&port=2&duration=1
 ```
 
-Start in **Log only**. Check **Recent alarm activity** with a registered pass, an unregistered pass and a replay. PlateLog waits two seconds after the latest packet and holds pulses when the list is empty or the passage is ambiguous.
+Start in **Log only**. Check **Recent delivery activity** with a registered pass, an unregistered pass and a replay. This mode contacts neither the Axis device nor the SMTP server. PlateLog waits two seconds after the latest packet and holds actions when the list is empty or the passage is ambiguous.
 
-For **Live**, enter that device's Axis Operator username and a password variable such as `PLATELOG_AXIS_RELAY_PASSWORD_ENTRY` in the same row. Supply the password to the PlateLog service through that variable. Use the hostname or IPv4 address from the device's trusted certificate and include the HTTPS port if it differs from 443. Pulses must last 1–30 seconds. Live alarms use captures at most one minute old, with five seconds of tolerance for a camera ahead. PlateLog sends one request per qualifying passage. Check **Axis accepted** against the device's configured action during commissioning. An uncertain delivery is recorded as **Unconfirmed** and receives no automatic retry. [Axis authentication](https://developer.axis.com/vapix/authentication/)
+For **Live**, enter that device's Axis Operator username and a password variable such as `PLATELOG_AXIS_RELAY_PASSWORD_ENTRY` in the rule editor. Supply the password to the PlateLog service through that variable. Use the hostname or IPv4 address from the device's trusted certificate and include the HTTPS port if it differs from 443. Pulses must last 1–30 seconds. Live alarms use captures at most one minute old, with five seconds of tolerance for a camera ahead. PlateLog sends one request per qualifying passage. Check **Axis accepted** against the device's configured action during commissioning. An uncertain delivery is recorded as **Unconfirmed** and receives no automatic retry. [Axis authentication](https://developer.axis.com/vapix/authentication/)
 
 Start the preview with a persistent directory:
 
@@ -161,11 +199,11 @@ python -m platelog preview --data-dir .platelog-data --timezone Australia/Sydney
 
 When no administrator password has been set, sign in with `admin`, enter a new password of at least 14 characters, then sign in with the new password. The initial sign-in only opens the password change form. To set your own password before opening the listener, run `python -m platelog admin-password --data-dir .platelog-data` first.
 
-The preview register opens without sign-in by default. To require sign-in, sign in to **Admin**, set a separate staff password under **Register access**, and enable **Require staff sign-in to view the register**. Staff can use the register, search, passage details, photos and Excel exports. Only the administrator password opens both the register and **Admin**, including camera settings, retention, scheduled reports and service controls. Changing register access or rotating the staff password ends staff sessions. Upgrading removes any previously enabled staff access to Admin.
+The preview plate log opens without sign-in by default. To require sign-in, open **Admin → Access & security**, set a separate staff password under **Plate log access**, and enable **Require staff sign-in to view the plate log**. Staff can use the plate log, search, passage details, photos and Excel exports. Only the administrator password opens both the plate log and **Admin**, including camera settings, retention, scheduled reports and service controls. Changing plate log access or rotating the staff password ends staff sessions. Upgrading removes any previously enabled staff access to Admin.
 
 Under **Retention**, new installations start with automatic cleanup enabled and keep passages for 360 days and photos for 90 days. Existing installations keep their current cleanup setting, including the previous off default if nobody saved a preference. Cleanup runs at startup and hourly while enabled. **Purge now** asks for confirmation and applies the saved limits immediately, even when automatic cleanup is off. Purging a passage removes all of its event packets and photos. A passage expires based on its last capture, and a photo expires based on its own capture. Shorter photo retention can leave a passage searchable with an **Image expired** label. **Storage** shows passage, event and photo counts, and **Recent admin activity** records purges and settings changes.
 
-Under **Daily CSV report**, enable the schedule, choose a time such as `00:05`, and enter an existing destination folder. **Test folder** checks the entered path from the PlateLog service by writing, reading back, and removing a temporary file. Use **Save CSV schedule** to apply your changes. PlateLog writes `platelog-YYYY-MM-DD.csv` for the previous calendar day in the register's time zone. It includes headers even on empty days. The rows reflect the passages still in the register when the report runs. If the folder is temporarily unavailable, PlateLog retries the previous day's export while it is still due and shows the result in Admin.
+Under **Daily CSV report**, enable the schedule, choose a time such as `00:05`, and enter an existing destination folder. **Test folder** checks the entered path from the PlateLog service by writing, reading back, and removing a temporary file. Use **Save CSV schedule** to apply your changes. PlateLog writes `platelog-YYYY-MM-DD.csv` for the previous calendar day in the plate log's time zone. It includes headers even on empty days. The rows reflect the passages still in the register when the report runs. If the folder is temporarily unavailable, PlateLog retries the previous day's export while it is still due and shows the result in Admin.
 
 ![Daily CSV report settings with Test folder beside the destination field](docs/images/admin-csv-folder.png)
 
@@ -173,7 +211,7 @@ For a remote Windows share, use a UNC folder such as `\\fileserver\reports\Plate
 
 Once signed in, use **Change administrator password** and enter the current password. Changing the password ends all Admin sessions. In a persistent preview, **Restart PlateLog** restarts the web server, keeps the data in the same directory, and returns Admin to sign-in.
 
-**Admin → Display** changes the time zone used for the register, date and time filters, and Excel reports. In a preview started with `--manage-web-port`, **Admin → Service** sets the staff web port and **Admin → Axis cameras** sets the dedicated camera POST port. They default to `8765` and `8766`. Allow a new TCP port in the firewall before applying it. Saving either port restarts PlateLog. When the camera port changes, update the POST destinations on the cameras. The staff web port passed at launch is the fallback if the saved staff port is occupied at startup. If the camera port is unavailable, the register and Admin can still start.
+**Admin → System → Display** changes the time zone used for the plate log, date and time filters, and Excel reports. In a preview started with `--manage-web-port`, **Admin → System → Listener ports** sets the staff web port and dedicated camera POST port. They default to `8765` and `8766`. Allow a new TCP port in the firewall before applying it. Saving either port restarts PlateLog. When the camera port changes, update the POST destinations on the cameras. The staff web port passed at launch is the fallback if the saved staff port is occupied at startup. If the camera port is unavailable, the plate log and Admin can still start.
 
 In the preview, Admin and staff sign-in work over HTTP once their passwords are configured. To reach the preview from an approved private LAN, add `--host 0.0.0.0 --allowed-host YOUR_HOST` to the preview command. HTTP carries passwords and session cookies in clear text. To require HTTPS for both sign-ins, use `--require-https-admin --tls-cert CERT.pem --tls-key KEY.pem` with a certificate trusted by clients. The `admin-password` command resets the administrator password and invalidates administrator sessions.
 

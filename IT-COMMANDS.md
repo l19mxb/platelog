@@ -66,7 +66,7 @@ Use the DNS name from Step 1 in the health check.
 Invoke-RestMethod -Uri 'https://platelog.example.internal/healthz' -TimeoutSec 10 -ErrorAction Stop
 ```
 
-Expect **ready** in **pilot** mode. Open `/admin`, set the staff password in **Register access**, then test staff sign-in in a private browser window.
+Expect **ready** in **pilot** mode. Open `/admin`, select **Access & security**, set the staff password in **Plate log access**, then test staff sign-in in a private browser window.
 
 **Standalone PC.** Run the [trust helper](examples/Trust-PlateLogCertificate.ps1) as the staff user from the handoff folder. Use IT's approved public DER `.cer` and its verified SHA-256.
 
@@ -81,9 +81,16 @@ Expect **ready** in **pilot** mode. Open `/admin`, set the staff password in **R
 2. Give the camera its own credential in **Admin → Axis cameras**. Set its HTTPS POST URL to `https://<name>:8766/api/axis/<id>/events`.
 3. Verify camera trust. Send one controlled pass and check the plate, time and photo.
 
+## Optional email alerts (SMTP)
+
+1. Allow outbound TCP only to the approved SMTP relay and port.
+2. In **Admin → Alarm rules → Email delivery (SMTP)**, enter the relay, port, TLS mode and sender address. Prefer **STARTTLS** or **TLS (implicit)**. Use **None** only for an approved internal IP-authorised relay without a password.
+3. If authentication is required, supply `PLATELOG_SMTP_PASSWORD_RELAY` through IT's approved service environment and enter that variable name plus the username in Admin. Restart through the normal supervisor after changing the supplied password value.
+4. Select **Test connection**, then **Save SMTP settings**. The test sends no email. Add recipients to a rule, start with **Log only**, and verify a controlled **Live** event before handover.
+
 ## Change or reset the Admin password
 
-Use **Admin → Change administrator password**. For a server reset, use interactive PowerShell and the active data folder. Existing Admin sessions end.
+Use **Admin → Access & security → Change administrator password**. For a server reset, use interactive PowerShell and the active data folder. Existing Admin sessions end.
 
 ```powershell
 & {

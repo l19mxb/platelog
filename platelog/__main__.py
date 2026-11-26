@@ -276,7 +276,7 @@ def main() -> None:
                     if store.setting("preview_seeded") is None:
                         if not args.no_demo:
                             demo(data_dir)
-                        store.set_setting("preview_seeded", "yes", "Register initialised" if args.no_demo else "Demo data seeded")
+                        store.set_setting("preview_seeded", "yes", "Plate log initialised" if args.no_demo else "Demo data seeded")
                 else:
                     demo(data_dir)
                 run_preview(args, data_dir, display_zone)
