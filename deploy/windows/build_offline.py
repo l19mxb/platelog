@@ -12,6 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 SOURCE = Path(__file__).resolve().parents[2]
 APP_FILES = (
     "README.md", "IT-COMMANDS.md", "LICENSE", "technical-spec.md", "requirements.txt", "deploy/windows/README.md",
+    "docs/SOC2-READINESS.md", "docs/HARDENING.md", "docs/security-evidence-2026-11-26.json",
     "docs/images/register.png", "docs/images/register-search.png", "docs/images/demo-l19mxb.jpg",
     "docs/images/admin-csv-folder.png",
     "examples/Send-AxisEvent.ps1",

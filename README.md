@@ -6,6 +6,8 @@ PlateLog is a prototype for a local Axis licence plate log. A persistent instanc
 
 **[IT quick start](IT-COMMANDS.md)** has the server setup block, staff PC check and Admin password reset.
 
+**Security review:** [SOC 2 readiness assessment — 26 November 2026](docs/SOC2-READINESS.md) · [Windows hardening guide](docs/HARDENING.md). Review the open site acceptance gates before live capture.
+
 Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.4**. The offline ZIP includes Python source, local wheels, a hash-locked requirements file and the deployment guide. [SQLite WAL advisory](https://sqlite.org/wal.html#the_wal_reset_bug)
 
 - **Staff and Admin** use HTTPS on **TCP 443** by default. Set an alternate staff port with `--port` if IT requires one.

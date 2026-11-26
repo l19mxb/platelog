@@ -1,0 +1,411 @@
+{
+  "assessment_date_local": "2026-11-26",
+  "timezone": "Australia/Sydney",
+  "reviewed_application_commit": "11e7125c5e13564ed96cc218cb38643a951b38eb",
+  "tested_archive_sha256": "830a5ff4da28b8fb3e3961797a88cc35f88792c59ba8d7d6209c276a6594c383",
+  "runtime_archive_sha256": "294f5ed7ab97148fcbb57b8c06ba428f6d282c2bbaa266dbe3137284497998f0",
+  "application_files_sha256": {
+    "app/LICENSE": "1afd29070611fa98c4868f3b115e2d538e5af1ce8200fb25e8bbe215e57340ec",
+    "app/platelog/__init__.py": "d5e54da3e1cb278ad4be2c47137bfab7abf1be0c594e28ac4ce81785e3ccc28f",
+    "app/platelog/__main__.py": "589eeedaeeb3450f6c375d40596ce5b3c95dd42d03d76306e53410ba78a83595",
+    "app/platelog/admin_ui.py": "63c8955718752fa09295acb1b3f7fc1cede50a39c21aa3dff8e664b946145d98",
+    "app/platelog/alarm_admin.py": "adab2a99a8bf1c50bd1a195b015a31948a7e486b568e758a784ca1a34ea66ace",
+    "app/platelog/alarms.py": "ec1f496614dcc0cda5507532538a4a184e0aaedf650179f8b9fd8c2b6c60fcdf",
+    "app/platelog/audible.py": "908b33411c95f1093ca587efaf98f839606e904b4a67917162c0df22141e5eba",
+    "app/platelog/axis.py": "5547c11cc840dea691c3807c036e8177784ebd5cad8768c0ecbf210cf810c315",
+    "app/platelog/credentials.py": "7920346e12aae7830adbf431d635bdc5f9f4e24c56c25b0dc842468bcb969401",
+    "app/platelog/daily_csv.py": "906911168d532d34a8b238b465f8aae21e7aaa1646b2418ce04f39a389e31a94",
+    "app/platelog/diagnostics.py": "9edd1b12eb522ce8c1f6165c689b3fb96bd04561e7eac33a709fda451d69438c",
+    "app/platelog/email_alerts.py": "6dd2f66ee3904c243af427953cceb3f186c9e0f05dabede1b4c117dbfed0c5f2",
+    "app/platelog/fixtures/entry.jpg": "6614e4705d1bae4be5e6d36a0bf521dcf2ca0f1942e171d64ee68a9c39362424",
+    "app/platelog/fixtures/exit.jpg": "e47a27ef743ea5d3d43371a8560f9e24b312fe9ae6239f9c7346c35162312008",
+    "app/platelog/import_review.py": "4ce091d15ec1b76d937d3ab73a6236e64131488fb75d70c74a6013887226765f",
+    "app/platelog/preview.py": "88860f0bd3cdfccef70e956201fc07684dea4714840a5fb2beed39f1dc4f65e9",
+    "app/platelog/receiver.py": "c7ad94d031533c5c72132e25464879186bbcaaf5e10dd3220d79d3df03a65269",
+    "app/platelog/register_stats.py": "3641dde10e8883423000bed8b7de77882413d4e4f7da097bd53c6be42f94f011",
+    "app/platelog/registered_refresh.py": "932001eebbb3f106dbed88342b26a884428bf39f95355c00c1d015a95f6b82b8",
+    "app/platelog/simulator.py": "1c115c2aff60cfbf65c62fef5f45cc572d49eef6cbbeaf74266b8950d73b4c12",
+    "app/platelog/store.py": "17d1bfca50ef5a38256879b8361d8cae1983adac6beac96628235738af17d4a1",
+    "app/platelog/vehicle_import.py": "c81071e409a66f600cc3d9c468746b86094f7f614edc1d1e8724092b9e57a0ad",
+    "app/requirements.txt": "5fecc5e9a8092fdf2da70f4d620d6d3e86c79bc686996ae61268aad0fe19ad5c",
+    "app/tests/test_alarms.py": "da5a9734fcfb1b6b26ff9e8519cc55fb72d10c0c05ed8c0f51088da096c98d06",
+    "app/tests/test_audible.py": "f84833b9e751110a37f4d626b018682c0d2696126d25a4c98d559e1efd0a5abb",
+    "app/tests/test_diagnostics.py": "3a50255099b0432fa6958814e281a51f39779aa1a5d43d6d6881ff7cee23020a",
+    "app/tests/test_passage_history.py": "9377fb41f8d8d5b078c49722b9b17befb733406b6a9bc380ab5fe043d7c4c2a1",
+    "app/tests/test_receiver.py": "22430c6803dc196cbc846eb853ad070451c0d604033627f9cd52431b221def9e",
+    "app/tests/test_registered_vehicles.py": "759281f1fadbeec52620312df6e75d3c12a2037f33484d4f0b4743ef6203a5a9",
+    "app/tests/test_smtp.py": "4bac1904e928db4963c54ceb70391953c9178cfab37130eaa17aa824ff099711"
+  },
+  "windows_server": {
+    "edition": "Microsoft Windows Server 2025 Standard Evaluation",
+    "build": "26100",
+    "tested_utc": "2026-11-26T04:31:49.4435650+00:00",
+    "offline_install": "Passed",
+    "no_default_route": true,
+    "core": {
+      "Result": "Passed",
+      "Python": "3.15.2",
+      "SQLite": "3.53.4",
+      "SQLiteSource": "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc",
+      "StaffHTTPS": {
+        "port": 443,
+        "tls": "TLSv1.3"
+      },
+      "CameraHTTPS": {
+        "port": 8766,
+        "tls": "TLSv1.3"
+      },
+      "StaffAdminAccess": "Passed",
+      "AxisPhotoAndDuplicate": "Passed",
+      "ExcelWithAndWithoutPhotos": "Passed",
+      "SQLiteRestoreRetentionAndCSV": "Passed",
+      "DiagnosticZIPPeriodsAndPrivacy": "Passed",
+      "DefaultCSVReplace": "Passed"
+    },
+    "units": {
+      "Result": "Passed",
+      "Passed": 72
+    },
+    "smtp_mocks": {
+      "starttls": {
+        "result": "passed",
+        "protocols": [
+          "TLSv1.3"
+        ],
+        "authenticated_sessions": 2,
+        "messages": 1,
+        "untrusted_certificate": "rejected",
+        "connection_test_mail_count": 0
+      },
+      "tls": {
+        "result": "passed",
+        "protocols": [
+          "TLSv1.3"
+        ],
+        "authenticated_sessions": 2,
+        "messages": 1,
+        "untrusted_certificate": "rejected",
+        "connection_test_mail_count": 0
+      }
+    },
+    "vapix_mocks": {
+      "result": "passed",
+      "isolated_passages": 13,
+      "relay_mock_requests": 4,
+      "camera_mock_requests": 1,
+      "verified": [
+        "staff/administrator separation",
+        "HTTPS and timed URL validation",
+        "registered and unregistered triggers",
+        "wrong camera and Off suppress actions",
+        "duplicate replay",
+        "OCR correction during settle window",
+        "stale capture held",
+        "pending rule cancelled",
+        "Log only activity",
+        "Axis XML error",
+        "unconfirmed timeout without resend",
+        "delivery after the timeout"
+      ]
+    }
+  },
+  "deployment": {
+    "result": "Passed",
+    "installed_source": "Matches every app source file in the IT ZIP",
+    "settings_preserved": true,
+    "data_preservation": "Passed"
+  },
+  "additional_security_checks": {
+    "result": "Passed",
+    "source_commit": "11e7125c5e13564ed96cc218cb38643a951b38eb",
+    "probes": 28,
+    "checks": [
+      {
+        "check": "Anonymous diagnostics denied",
+        "result": "passed",
+        "observed": 403
+      },
+      {
+        "check": "Staff sign-in",
+        "result": "passed",
+        "observed": 303
+      },
+      {
+        "check": "Staff diagnostics denied",
+        "result": "passed",
+        "observed": 403
+      },
+      {
+        "check": "Admin sign-in",
+        "result": "passed",
+        "observed": 303
+      },
+      {
+        "check": "Foreign Origin denied",
+        "result": "passed",
+        "observed": 403
+      },
+      {
+        "check": "Foreign Host denied",
+        "result": "passed",
+        "observed": 400
+      },
+      {
+        "check": "Forged CSRF denied",
+        "result": "passed",
+        "observed": 403
+      },
+      {
+        "check": "Non-form body denied",
+        "result": "passed",
+        "observed": 415
+      },
+      {
+        "check": "Oversized form denied",
+        "result": "passed",
+        "observed": 413
+      },
+      {
+        "check": "History path traversal denied",
+        "result": "passed",
+        "observed": 400
+      },
+      {
+        "check": "Staff import denied",
+        "result": "passed",
+        "observed": 403
+      },
+      {
+        "check": "Replace preview",
+        "result": "passed",
+        "observed": 200
+      },
+      {
+        "check": "Preview makes no list changes",
+        "result": "passed",
+        "observed": 2
+      },
+      {
+        "check": "Preview reports one removal",
+        "result": "passed",
+        "observed": 1
+      },
+      {
+        "check": "Replacement confirmation required",
+        "result": "passed",
+        "observed": 400
+      },
+      {
+        "check": "Changed file invalidates preview",
+        "result": "passed",
+        "observed": 409
+      },
+      {
+        "check": "Changed mode invalidates preview",
+        "result": "passed",
+        "observed": 409
+      },
+      {
+        "check": "Forged receipt denied",
+        "result": "passed",
+        "observed": 409
+      },
+      {
+        "check": "Confirmed replacement applied",
+        "result": "passed",
+        "observed": 200
+      },
+      {
+        "check": "Approved list retained",
+        "result": "passed",
+        "observed": 1
+      },
+      {
+        "check": "Old receipt rejected after list change",
+        "result": "passed",
+        "observed": 409
+      },
+      {
+        "check": "Empty import rejected",
+        "result": "passed",
+        "observed": 400
+      },
+      {
+        "check": "Failed import keeps last good list",
+        "result": "passed",
+        "observed": 1
+      },
+      {
+        "check": "Admin diagnostic download",
+        "result": "passed",
+        "observed": 200
+      },
+      {
+        "check": "Credential and private-message canaries excluded",
+        "result": "passed",
+        "observed": true
+      },
+      {
+        "check": "Number plates excluded",
+        "result": "passed",
+        "observed": true
+      },
+      {
+        "check": "Password verifier excluded",
+        "result": "passed",
+        "observed": true
+      },
+      {
+        "check": "No-store response",
+        "result": "passed",
+        "observed": true
+      }
+    ],
+    "live_devices_contacted": false
+  },
+  "unit_reproduction": {
+    "result": "Passed",
+    "tests": 72,
+    "command": "python -B -m unittest discover -s tests -q",
+    "scope": "Windows review host; prior exact-ZIP Server 2025 run recorded above"
+  },
+  "dependency_review": {
+    "checked_utc": "2026-11-26T06:13:44.845008+00:00",
+    "source_commit": "11e7125c5e13564ed96cc218cb38643a951b38eb",
+    "archive_sha256": "830a5ff4da28b8fb3e3961797a88cc35f88792c59ba8d7d6209c276a6594c383",
+    "manifest_verified": true,
+    "locked_wheels": 16,
+    "python": "3.15.2",
+    "sqlite": "3.53.4",
+    "openssl": "OpenSSL 3.5.9 29 Sep 2026",
+    "tls_default": {
+      "minimum": "TLSv1_2",
+      "hostname_check": true,
+      "crl_check": false
+    },
+    "packages": [
+      {
+        "name": "annotated-doc",
+        "version": "0.0.6",
+        "advisories": []
+      },
+      {
+        "name": "annotated-types",
+        "version": "0.8.0",
+        "advisories": []
+      },
+      {
+        "name": "anyio",
+        "version": "4.16.0",
+        "advisories": []
+      },
+      {
+        "name": "click",
+        "version": "8.5.1",
+        "advisories": []
+      },
+      {
+        "name": "fastapi",
+        "version": "0.162.5",
+        "advisories": []
+      },
+      {
+        "name": "h11",
+        "version": "0.16.0",
+        "advisories": []
+      },
+      {
+        "name": "idna",
+        "version": "3.20",
+        "advisories": []
+      },
+      {
+        "name": "opentelemetry-api",
+        "version": "1.45.2",
+        "advisories": []
+      },
+      {
+        "name": "pillow",
+        "version": "13.0.0",
+        "advisories": []
+      },
+      {
+        "name": "pydantic",
+        "version": "2.14.3",
+        "advisories": []
+      },
+      {
+        "name": "pydantic-core",
+        "version": "2.50.4",
+        "advisories": []
+      },
+      {
+        "name": "starlette",
+        "version": "1.10.0",
+        "advisories": []
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0",
+        "advisories": []
+      },
+      {
+        "name": "typing-inspection",
+        "version": "0.4.5",
+        "advisories": []
+      },
+      {
+        "name": "tzdata",
+        "version": "2026.6",
+        "advisories": []
+      },
+      {
+        "name": "uvicorn",
+        "version": "0.54.0",
+        "advisories": []
+      },
+      {
+        "name": "pip",
+        "version": "26.2.2",
+        "advisories": []
+      }
+    ],
+    "positive_control": {
+      "name": "h11",
+      "version": "0.14.0",
+      "advisories": [
+        "GHSA-vqfr-h8mv-ghfj",
+        "PYSEC-2026-348"
+      ]
+    },
+    "scope_limit": "OSV exact PyPI versions only; separate native runtime, OS and firmware review required."
+  },
+  "openssl": {
+    "version": "3.5.9",
+    "upstream_severity": "Low",
+    "advisory_count": 3,
+    "issue_count": 12,
+    "advisories": [
+      "https://openssl-library.org/news/secadv/20261110.txt",
+      "https://openssl-library.org/news/secadv/20261117.txt",
+      "https://openssl-library.org/news/secadv/20261124.txt"
+    ],
+    "fix_scheduled_upstream": "2026-12-01",
+    "target_35_version": "3.5.10",
+    "applicability": "Trigger features not enabled in the reviewed application paths; source/configuration inference. Runtime is not patched by this review."
+  },
+  "limitations": [
+    "Not an independent CPA SOC 2 examination or full penetration test",
+    "No workplace infrastructure or device configuration audited",
+    "No actual relay actuation or workplace mailbox delivery tested",
+    "OSV covers exact PyPI versions, not every native component, Windows or camera firmware",
+    "Lab evidence does not establish workplace operating effectiveness"
+  ],
+  "runtime_signature": {
+    "Status": "Valid",
+    "Publisher": "CN=Python Software Foundation, O=Python Software Foundation, L=Beaverton, S=Oregon, C=US",
+    "ExecutableSHA256": "d4e19e9a33268fb0ce575a24ab2d4b85972524f1933df008a6befc14dce19fbd",
+    "RuntimeArchiveSHA256": "294f5ed7ab97148fcbb57b8c06ba428f6d282c2bbaa266dbe3137284497998f0"
+  },
+  "security_probe_script_sha256": "b56c38389ed62497b92def2b0b7897fa95ee0325ff7cc3a44115ed0fd53a375d"
+}

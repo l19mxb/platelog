@@ -2,6 +2,8 @@
 
 Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.4**.
 
+**Before live use:** follow the [hardening guide](docs/HARDENING.md) and record decisions on the [current readiness findings](docs/SOC2-READINESS.md#findings-and-owners). These documents supersede the 17 November assessment included in earlier ZIPs.
+
 ## Before you start
 
 - **Files** — Put the approved ZIP and its trusted `.sha256` file in the same server folder.
