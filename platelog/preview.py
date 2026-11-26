@@ -176,6 +176,13 @@ tr[data-registered] .registration a, .registration-status { color: var(--registr
 .passage-history { font-variant-numeric: tabular-nums; }
 .passage-history strong { font-size: 1.05rem; }
 .history-unknown { display: block; color: #4b5d70; font-size: .75rem; }
+.creator-hover { position: relative; }
+.creator-tooltip { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+    padding: 6px 10px; border-radius: 4px; color: white; background: #172638;
+    box-shadow: 0 3px 10px #0003; font: normal .8rem/1.4 system-ui, sans-serif;
+    letter-spacing: normal; white-space: nowrap; pointer-events: none;
+    opacity: 0; visibility: hidden; transition: opacity 0s, visibility 0s; }
+.creator-hover:hover > .creator-tooltip { opacity: 1; visibility: visible; transition-delay: 20s; }
 td[data-column] { white-space: normal; overflow-wrap: anywhere; }
 td[data-column="make"], td[data-column="colour"] { white-space: nowrap; overflow-wrap: normal; }
 figure { margin: 12px 0; } figure img { display: block; width: auto; max-width: min(100%, 640px); height: auto; border-radius: 5px; }
@@ -688,8 +695,8 @@ def page(title: str, content: str, *, show_admin: bool = True, header_extra: str
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>{escape(title)} | PlateLog</title><link rel="stylesheet" href="/preview.css"><script defer src="/preview.js"></script>
     <script defer src="/audible.js"></script><script defer src="/admin.js"></script></head>
-    <body{' class="admin-page"' if tab == 'admin' else ''}><main><header><div class="header-top"><div><h1 title="🧠 by Liam.">PlateLog</h1><p>Vehicle passage log</p></div>{header_extra}</div>
-    <nav class="tabs" aria-label="PlateLog"><a href="/" title="🧠 by Liam."{register_current}>Plate log</a>
+    <body{' class="admin-page"' if tab == 'admin' else ''}><main><header><div class="header-top"><div><h1 class="creator-hover">PlateLog<span class="creator-tooltip" aria-hidden="true">🧠 by Liam.</span></h1><p>Vehicle passage log</p></div>{header_extra}</div>
+    <nav class="tabs" aria-label="PlateLog"><a href="/" class="creator-hover"{register_current}>Plate log<span class="creator-tooltip" aria-hidden="true">🧠 by Liam.</span></a>
     {admin_link}</nav></header>{content}</main></body></html>"""
 
 
