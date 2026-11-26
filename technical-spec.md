@@ -57,6 +57,14 @@ Use SQLite’s backup API for a consistent database copy. Pin the images referen
 
 ## Build and pilot gates
 
+### Implemented offline diagnostics
+
+**Admin → Diagnostics** exports an authenticated support ZIP for a rolling 1, 2 or 3 days, or all available retained history. The standard-library exporter can also run directly when the web app or its dependencies will not start. It collects runtime/source fingerprints, current safe configuration and database counts, redacted activity and structured operational errors. It does not collect raw payloads, number plates, photos, addresses, paths, credentials, exception messages or local variables, and does not contact any external destination.
+
+Detailed operational logs rotate across four 2 MiB files and expire after 30 days on the next write. Collection reads a maximum of 8 MiB of detailed logs, limits each retained activity file to 5,000 entries and rejects bundle input above 12 MiB. The manifest and health file state the selected period, available records and collection limits. Logging failures do not fail camera ingestion. New detailed history begins with this version; a support ZIP does not replace a database backup or an independent audit trail.
+
+### Acceptance checks
+
 1. **Ingest and replay.** Verify a synthetic JSON payload with a JPEG and a metadata-only payload. Confirm that replay keeps one packet, two cameras can use the same runtime ID, a correction keeps the original evidence, and delayed data cannot rewrite newer state. Verify disk-write failure and recovery.
 2. **Register and accounts.** Verify search, filters, the 24-hour activity chart, auto-refresh and photo access. Confirm the register and downloads require staff or Admin sign-in when staff sign-in is enabled. Verify the Admin routes require the Admin credential.
 3. **Export and housekeeping.** Verify filtered Excel exports with and without photos and a scheduled daily CSV. Exercise retention and restore both the database and photos in a disposable instance.

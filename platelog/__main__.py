@@ -21,6 +21,7 @@ import uvicorn
 
 from .receiver import DEFAULT_CAMERA_PORT, make_app, make_camera_receiver
 from .simulator import call, run_scenario
+from .diagnostics import attach_server_error_logging, record_event, main as diagnostics_main
 
 
 def demo(data_dir: Path | None = None) -> dict:
@@ -116,11 +117,13 @@ def run_preview(args, data_dir: Path, display_zone: ZoneInfo) -> None:
         server.should_exit = True
 
     def config(app, port: int, *, tls: bool) -> uvicorn.Config:
-        return uvicorn.Config(
+        configured = uvicorn.Config(
             app, host=args.host, port=port, proxy_headers=False, access_log=False, timeout_graceful_shutdown=15,
             ssl_certfile=str(args.tls_cert) if tls else None,
             ssl_keyfile=str(args.tls_key) if tls else None,
         )
+        attach_server_error_logging(data_dir)
+        return configured
 
     async def serve_both(browser_socket: socket.socket | None, intake_socket: socket.socket | None):
         browser_sockets = [browser_socket] if browser_socket is not None else None
@@ -141,6 +144,7 @@ def run_preview(args, data_dir: Path, display_zone: ZoneInfo) -> None:
         try:
             web_socket = bind_port(int(saved_web))
         except OSError as exc:
+            record_event(data_dir, "listener.unavailable", "service", level="warning", error=exc, staff_port=int(saved_web))
             print(f"PlateLog: saved web port {saved_web} is unavailable ({exc}). Using port {web_port}.", file=sys.stderr)
             store.set_setting("web_port", str(web_port), f"Web port restored to {web_port} because port {saved_web} was unavailable")
         else:
@@ -163,6 +167,7 @@ def run_preview(args, data_dir: Path, display_zone: ZoneInfo) -> None:
                     try:
                         camera_socket = bind_port(camera_port)
                     except OSError as exc:
+                        record_event(data_dir, "listener.unavailable", "camera", level="error", error=exc, camera_port=camera_port)
                         if pilot:
                             raise RuntimeError(f"Unable to bind the camera POST port {camera_port}: {exc}") from exc
                         print(f"PlateLog: camera POST port {camera_port} is unavailable ({exc}).", file=sys.stderr)
@@ -218,6 +223,10 @@ def main() -> None:
         server.add_argument("--tls-key", type=Path, required=server is pilot, help="PEM private key for HTTPS")
     password = commands.add_parser("admin-password", help="Set or reset the administrator password in a data directory")
     password.add_argument("--data-dir", type=Path, required=True)
+    diagnostics = commands.add_parser("diagnostics", help="Create an offline support ZIP without starting PlateLog")
+    diagnostics.add_argument("--data-dir", type=Path, required=True)
+    diagnostics.add_argument("--days", choices=("1", "2", "3", "all"), default="1")
+    diagnostics.add_argument("--output", type=Path, required=True)
     serve = commands.add_parser("serve", help="Start a persistent local demo receiver")
     serve.add_argument("--data-dir", default=".platelog-data", type=Path)
     simulate = commands.add_parser("simulate", help="Send and verify synthetic events against the local receiver")
@@ -227,7 +236,16 @@ def main() -> None:
                              help=f"TCP port (default {port})")
     args = parser.parse_args()
 
+    log_directory = getattr(args, "data_dir", None) if args.command in {"pilot", "preview", "serve"} else None
+    if log_directory is not None:
+        record_event(log_directory, "service.launch", "service", mode="pilot" if args.command == "pilot" else
+                     "simulation" if args.command == "serve" else "preview", staff_port=args.port,
+                     camera_port=getattr(args, "camera_port", None), https=bool(getattr(args, "tls_cert", None)))
+
     try:
+        if args.command == "diagnostics":
+            diagnostics_main(["--data-dir", str(args.data_dir), "--days", args.days, "--output", str(args.output)])
+            return
         if args.command == "demo":
             print(json.dumps(demo(), indent=2))
             return
@@ -288,7 +306,14 @@ def main() -> None:
             uvicorn.run(make_app(args.data_dir, token), host="127.0.0.1", port=args.port, access_log=False)
         else:
             print(json.dumps(run_scenario(args.port, token), indent=2))
-    except (ValueError, RuntimeError, OSError) as exc:
+    except SystemExit as exc:
+        if log_directory is not None and exc.code:
+            record_event(log_directory, "service.failed", "service", level="error", error=exc,
+                         exit_code=exc.code if type(exc.code) is int else 1)
+        raise
+    except Exception as exc:
+        if log_directory is not None:
+            record_event(log_directory, "service.failed", "service", level="error", error=exc)
         parser.exit(1, f"PlateLog: {exc}\n")
 
 

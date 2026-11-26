@@ -41,6 +41,7 @@ from .credentials import (
     password_verifier,
 )
 from .daily_csv import check_report_folder, export_due_report, report_folder, report_schedule
+from .diagnostics import DOWNLOAD_LOCK, RANGES as DIAGNOSTIC_RANGES, build_support_bundle, record_event, route_category
 from .email_alerts import DEFAULT_SMTP, SMTP_SECRET_PREFIX, parse_smtp_settings, test_smtp_connection
 from .import_review import review_content, review_url, skipped_csv
 from .receiver import CAMERA_ID_PATTERN, CAMERAS, ID_PATTERN
@@ -891,7 +892,7 @@ def registered_refresh_form(store: Store, csrf: str, zone: str, *, draft: dict |
 def registered_vehicles_form(csrf: str, count: int, refresh: str) -> str:
     upload = field("plate-file", "Plate list", '<input type="file" name="plate_file" accept=".csv,.xlsx" required>',
                    "Use a CSV or XLSX with a Plate column, or Vehicle and Cardholder Authorised columns. Keep registrations as Text in Excel to preserve leading zeros. Commas separate plates; spaces are removed; punctuation is skipped for review.")
-    mode = field("import-mode", "Import mode", '<select name="import_mode"><option value="add">Add to existing list</option><option value="replace">Replace entire list</option></select>',
+    mode = field("import-mode", "Import mode", '<select name="import_mode"><option value="replace" selected>Replace entire list</option><option value="add">Add to existing list</option></select>',
                  "Add keeps existing registrations. Replace removes registrations absent from the file, after you preview and confirm the change.")
     return f'''<section id="registered-vehicles"><h3>Import list</h3>
         <p><strong data-registered-count>{count:,}</strong> registered plates ·
@@ -1146,6 +1147,19 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 <label class="enable"><input type="checkbox" name="confirm" value="yes" required>
                 Permanently delete passages older than {retention['passage_days']} days and photos older than {retention['photo_days']} days</label>
                 <button class="danger" type="submit">Purge now</button></form></section>'''
+        elif section == "diagnostics":
+            choices = ''.join(f'<option value="{key}">{label}</option>' for key, label in DIAGNOSTIC_RANGES.items())
+            period = field("diagnostic-days", "History to include", f'<select name="days">{choices}</select>',
+                           "Choose a rolling 24, 48 or 72 hours, or all available retained history. Detailed logs keep up to 30 days or 8 MiB. Older Admin, import and alarm outcomes are included where retained. The bundle states what was available and any limits.")
+            content = f'''<section><h3>Support bundle</h3><p>Download a ZIP to copy to a USB drive or share for support. Nothing is uploaded automatically.</p>
+                <form class="form-grid" method="post" action="/admin/diagnostics/download"><input type="hidden" name="csrf" value="{csrf}">
+                {period}<div class="form-actions"><button type="submit">Download diagnostics ZIP</button></div></form>
+                <p class="form-note">Includes system versions, safe configuration summaries, job outcomes and structured errors with code locations.
+                Excludes passwords, vehicle registrations, photos, raw payloads, email addresses and file paths.</p>
+                <p class="muted">Detailed logging starts with this version. Earlier faults may only have a saved job result or Admin activity entry.</p></section>
+                <section><h3>If the web page will not start</h3><p>IT can run the standard-library exporter directly from the extracted package folder, without starting PlateLog.</p>
+                <pre><code>python -I -B app/platelog/diagnostics.py --data-dir "C:\\ProgramData\\PlateLog\\pilot-data" --days 1 --output "C:\\Staging\\platelog-support.zip"</code></pre>
+                <p class="muted">Use the active data folder and an unused output filename. The exporter also works if the main database is missing or unreadable.</p></section>'''
         elif section == "system":
             timezone_field = field("timezone", "Time zone", f'<input name="timezone" maxlength="128" value="{escape(zone)}" required>',
                                    "Use an IANA time zone, such as Australia/Sydney. This controls displayed times and daily schedules. It does not change the Windows or camera clock.")
@@ -1234,6 +1248,27 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             raise HTTPException(403, "Reload the Admin page before submitting.")
         return csrf, fields
 
+    @app.post("/admin/diagnostics/download")
+    async def download_diagnostics(request: Request):
+        csrf, fields = await authorized_form(request)
+        days = fields.get("days", "1")
+        if days not in DIAGNOSTIC_RANGES:
+            return dashboard(csrf, "Choose 1 day, 2 days, 3 days or all available history.", 400, section="diagnostics")
+        if not DOWNLOAD_LOCK.acquire(blocking=False):
+            return dashboard(csrf, "Another support bundle is being prepared. Try again shortly.", 429, section="diagnostics")
+        try:
+            runtime = {"staff_port": web_port, "camera_port": camera_port, "camera_online": camera_online,
+                       "mode": "pilot" if pilot_camera_transport is not None else "preview", "https": request.url.scheme == "https"}
+            data = await run_in_threadpool(build_support_bundle, store.database.parent, days, runtime=runtime)
+        except (OSError, ValueError) as exc:
+            record_event(store.database.parent, "request.failed", "admin", level="error", error=exc, route="admin")
+            return dashboard(csrf, "The support bundle could not be created. Check free space and service permissions, or try a shorter period.", 500, section="diagnostics")
+        finally:
+            DOWNLOAD_LOCK.release()
+        record_event(store.database.parent, "support.download", "admin", days=int(days) if days != "all" else 0, bytes=len(data))
+        filename = f'platelog-support-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{days}.zip'
+        return Response(data, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
+
     def alarm_page(csrf: str, selected: str | None, *, draft: dict[str, str] | None = None,
                    message: str = "", status: int = 200, view: str = "rules", smtp_draft: dict | None = None) -> HTMLResponse:
         cameras = store.cameras()
@@ -1288,7 +1323,9 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 draft["secret_name"] = ""
             return alarm_page(csrf, None, view="smtp", smtp_draft=draft, message=str(exc), status=400)
         if fields.get("test_connection") == "yes":
-            result, detail = await run_in_threadpool(test_smtp_connection, config)
+            result, detail = await run_in_threadpool(test_smtp_connection, config, data_dir=store.database.parent)
+            record_event(store.database.parent, "smtp.test", "admin", outcome=result, security=config["security"],
+                         level="info" if result == "accepted" else "warning")
             return alarm_page(csrf, None, view="smtp", smtp_draft=config, message=detail,
                               status=200 if result == "accepted" else 400)
         await run_in_threadpool(store.save_smtp_settings, config)
@@ -1372,8 +1409,12 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
                 imported = parse_plate_import(bytes(body), file_type)
             except ValueError as exc:
                 store.record_registration_failure(source, mode, str(exc), getattr(exc, "imported", None))
+                record_event(store.database.parent, "registration.import_failed", "registered_list", level="warning", error=exc)
                 raise
             result = store.registration_import(imported.plates, replacing, expected, imported=imported, source=source)
+            if applying:
+                record_event(store.database.parent, "registration.import_completed", "registered_list",
+                             added=result["added"], removed=result["removed"], total=result["total"], skipped=imported.skipped_entries)
             result["import_report"] = imported.report()
             revision = result.pop("revision")
             if not applying:
@@ -1435,7 +1476,9 @@ def admin_routes(app: FastAPI, store: Store, persistent: bool, allow_http_admin:
             try:
                 await run_in_threadpool(check_report_folder, folder)
             except ValueError as error:
+                record_event(store.database.parent, "admin.folder_test", "admin", level="warning", error=error, outcome="failed")
                 return dashboard(csrf, status=400, csv_draft=draft, folder_result=str(error))
+            record_event(store.database.parent, "admin.folder_test", "admin", outcome="success")
             return dashboard(csrf, csv_draft=draft,
                              folder_result=f"Folder test passed for {folder}. PlateLog wrote, read, and removed a test file.")
         if not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", run_time):
@@ -1644,7 +1687,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         while True:
             try:
                 await run_in_threadpool(store.apply_retention)
-            except Exception:
+            except Exception as exc:
+                record_event(data_dir, "retention.failed", "retention", level="error", error=exc)
                 LOG.exception("PlateLog retention failed")
             await asyncio.sleep(3600)
 
@@ -1652,7 +1696,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         while True:
             try:
                 await run_in_threadpool(export_due_report, store, display_zone)
-            except Exception:
+            except Exception as exc:
+                record_event(data_dir, "csv.failed", "csv", level="error", error=exc)
                 LOG.exception("PlateLog daily CSV export failed")
             await asyncio.sleep(30)
 
@@ -1660,7 +1705,8 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         while True:
             try:
                 await run_in_threadpool(refresh_due_registrations, store, display_zone)
-            except Exception:
+            except Exception as exc:
+                record_event(data_dir, "registration.refresh_failed", "registered_list", level="error", error=exc)
                 LOG.exception("PlateLog scheduled registered list refresh failed")
             await asyncio.sleep(30)
 
@@ -1668,12 +1714,15 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
         while True:
             try:
                 await run_in_threadpool(run_due_alarms, store, display_zone=str(display_zone))
-            except Exception:
+            except Exception as exc:
+                record_event(data_dir, "alarm.failed", "alarms", level="error", error=exc)
                 LOG.exception("PlateLog alarm processing failed")
             await asyncio.sleep(0.5)
 
     @asynccontextmanager
     async def lifespan(_app):
+        record_event(data_dir, "service.ready", "service", staff_port=web_port, camera_port=camera_port,
+                     camera_online=camera_online, mode="pilot" if pilot_camera_transport is not None else "preview")
         jobs = (supervise_retention, supervise_csv, supervise_registered_refresh, supervise_alarms) if persistent else ()
         tasks = [asyncio.create_task(job()) for job in jobs]
         try:
@@ -1684,6 +1733,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             for task in tasks:
                 with suppress(asyncio.CancelledError):
                     await task
+            record_event(data_dir, "service.stopped", "service")
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
@@ -1695,7 +1745,16 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
 
     @app.middleware("http")
     async def preview_headers(request: Request, call_next):
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            await run_in_threadpool(record_event, data_dir, "request.failed", "web", level="error", error=exc,
+                                    route=route_category(request.url.path), method=request.method)
+            raise
+        if response.status_code >= 400:
+            await run_in_threadpool(record_event, data_dir, "request.rejected", "web",
+                                    level="error" if response.status_code >= 500 else "warning",
+                                    status=response.status_code, route=route_category(request.url.path), method=request.method)
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'"
@@ -1895,6 +1954,7 @@ def make_preview(data_dir: Path, allowed_host: str, display_zone: timezone | Zon
             return reject(f"{error} Export without photos or narrow From and To.", photo_fallback=True)
         finally:
             _excel_export_lock.release()
+        record_event(store.database.parent, "excel.completed", "web", passages=len(rows), bytes=len(report))
         return Response(report,
                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         headers={"Content-Disposition": 'attachment; filename="platelog-report.xlsx"'})

@@ -12,6 +12,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from .store import Store
+from .diagnostics import record_event
 
 
 DEFAULT_SCHEDULE = {"enabled": False, "run_time": "00:05", "folder": ""}
@@ -158,8 +159,10 @@ def _export_due_report(store: Store, display_zone: timezone | ZoneInfo, now: dat
     except FileExistsError:
         status.update(result="exists", message="A report file already exists for this date.")
     except OSError as exc:
+        record_event(store.database.parent, "csv.failed", "csv", level="error", error=exc)
         status.update(result="error", message=exc.strerror or str(exc))
     activity = f"Daily CSV for {day} · {status['message']}"
     if status["result"] == "error" and all(last.get(key) == status[key] for key in ("file", "result", "message")):
         return
     store.set_setting("daily_csv_status", json.dumps(status), activity)
+    record_event(store.database.parent, "csv.completed", "csv", outcome=status["result"])

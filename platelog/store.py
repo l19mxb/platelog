@@ -13,6 +13,7 @@ from .alarms import MAX_LIVE_AGE_MS, MAX_LIVE_FUTURE_MS, SETTLE_MS, AlarmRule
 from .audible import DEFAULT_SETTINGS as DEFAULT_SOUNDS
 from .axis import Event, plate_key
 from .email_alerts import DEFAULT_SMTP, DEFAULT_SUBJECT, parse_smtp_settings, smtp_ready
+from .diagnostics import record_event
 from .vehicle_import import PlateImport
 
 TRACK_WINDOW_MS = 60_000
@@ -694,6 +695,7 @@ class Store:
                 action = "Manual purge" if manual else "Retention"
                 self._audit(db, f"{action} removed {passages} passages and {photos} photos")
         self.reconcile()
+        record_event(self.database.parent, "retention.completed", "retention", passages=passages, photos=photos)
         return passages, photos
 
     def _passage(self, db: sqlite3.Connection, camera: str, event: Event) -> tuple[str, bool]:

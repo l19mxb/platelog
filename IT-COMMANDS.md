@@ -104,4 +104,25 @@ Use **Admin → Access & security → Change administrator password**. For a ser
 }
 ```
 
+## Download diagnostics
+
+**Admin → Diagnostics → choose a period → Download diagnostics ZIP.** Use 24 hours, 2 days, 3 days or all available retained history. Copy the ZIP through the approved transfer process. Nothing is uploaded automatically.
+
+If PlateLog will not start, edit the paths and run this from PowerShell. It uses only Python's standard library and also works with a missing or unreadable database. The output folder must exist; existing files are never overwritten.
+
+```powershell
+& {
+    $Package = 'C:\Program Files\PlateLog\pilot'
+    $Data = 'C:\ProgramData\PlateLog\pilot-data'
+    $Output = 'C:\Staging\platelog-support.zip'
+    & (Join-Path $Package '.venv\Scripts\python.exe') -I -S -B `
+        (Join-Path $Package 'app\platelog\diagnostics.py') --data-dir $Data --days 1 --output $Output
+    if ($LASTEXITCODE) { throw 'Diagnostics export failed. Check the paths, permissions and output filename.' }
+}
+```
+
+Change `--days 1` to `2`, `3` or `all`. Detailed logs keep up to **30 days or 8 MiB** and begin with this version. The ZIP contains runtime versions, safe settings summaries, counts, job outcomes, error types/codes and code locations. Passwords, number plates, photos, raw payloads, addresses and file paths are excluded. `health.json` reports unreadable or limited history. It is a support file, not a database backup.
+
+**CSV imports:** **Replace entire list** is the default. Preview the changes and confirm replacement before applying. Scheduled refreshes also replace the list.
+
 `START-HERE.md` and `HARDENING.md` inside the ZIP cover full deployment, live acceptance and rollback.

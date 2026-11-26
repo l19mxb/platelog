@@ -11,6 +11,7 @@ SECTIONS = {
     "retention": ("Data & retention", "Manage stored passages, photos and automatic cleanup."),
     "access": ("Access & security", "Control staff sign-in and the administrator password."),
     "system": ("System", "Manage display time, listener ports and service operation."),
+    "diagnostics": ("Diagnostics", "Download a support bundle for offline troubleshooting."),
 }
 
 
@@ -152,6 +153,7 @@ button.help-button { display:inline-flex; justify-content:center; align-items:ce
 .admin-page :focus-visible { outline:3px solid #4385bf; outline-offset:3px; }
 .admin-login { padding:32px 24px; max-width:30rem; margin:32px auto; }
 .admin-login h2 { font-size:26px; }
+.admin-content pre { max-width:100%; overflow-x:auto; padding:12px; background:#f3f6fa; border-radius:6px; font-size:12px; }
 .admin-login form { display:grid; gap:16px; }
 @media (max-width:1050px) { .admin-shell { grid-template-columns:200px minmax(0,1fr); }
     .admin.admin-content { padding:24px; } }

@@ -74,7 +74,8 @@ class AlarmTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 list(pool.map(lambda store: run_due_alarms(store, NOW + SETTLE_MS), (self.store, reopened)))
             run_due_alarms(reopened, NOW + SETTLE_MS + 9_000)
-            pulse.assert_called_once_with("a9210.example.internal", 2, 1, "qa-operator", SECRET)
+            pulse.assert_called_once_with("a9210.example.internal", 2, 1, "qa-operator", SECRET,
+                                          data_dir=self.store.database.parent, camera="entry")
         self.assertEqual(self.decisions()[event["passage_id"]], ("unconfirmed", "SIM-01"))
 
     def test_rule_edits_empty_list_and_stale_captures_hold_pulses(self):
@@ -115,8 +116,8 @@ class AlarmTests(unittest.TestCase):
         with patch("platelog.alarms.pulse_axis", return_value=("accepted", "Axis accepted.")) as pulse:
             run_due_alarms(self.store, NOW + SETTLE_MS)
         self.assertCountEqual(pulse.call_args_list, [
-            call("a9210.example.internal", 2, 1, "qa-operator", SECRET),
-            call("camera.example.internal", 2, 1, "camera-operator", other_secret),
+            call("a9210.example.internal", 2, 1, "qa-operator", SECRET, data_dir=self.data, camera="entry"),
+            call("camera.example.internal", 2, 1, "camera-operator", other_secret, data_dir=self.data, camera="exit"),
         ])
 
     def test_pasted_command_must_be_a_timed_https_virtual_input_url(self):

@@ -10,6 +10,7 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 from .store import Store
+from .diagnostics import record_event
 from .vehicle_import import IMPORT_BYTES, PlateImport, parse_plate_import
 
 DEFAULT_REFRESH = {"enabled": False, "source": "", "run_time": "01:15"}
@@ -86,16 +87,23 @@ def refresh_due_registrations(store: Store, display_zone: timezone | ZoneInfo, n
         try:
             imported = read_plate_source(csv_source(schedule["source"]))
             plates, report = imported.plates, imported.report()
-        except (FileNotFoundError, NotADirectoryError):
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            record_event(store.database.parent, "registration.refresh_failed", "registered_list", level="error", error=exc)
             error = "PlateLog could not find the CSV file."
-        except PermissionError:
+        except PermissionError as exc:
+            record_event(store.database.parent, "registration.refresh_failed", "registered_list", level="error", error=exc)
             error = "The PlateLog service could not read the CSV file. Check the file and share permissions."
         except OSError as exc:
+            record_event(store.database.parent, "registration.refresh_failed", "registered_list", level="error", error=exc)
             error = f"PlateLog could not read the CSV file. {exc.strerror or 'File access failed.'}"
         except ValueError as exc:
+            record_event(store.database.parent, "registration.refresh_failed", "registered_list", level="warning", error=exc)
             error = str(exc)
             imported = getattr(exc, "imported", None)
         store.finish_registered_refresh(revision, day, current.isoformat(timespec="seconds"), plates, error,
                                         import_report=report, imported=imported)
+        if plates:
+            record_event(store.database.parent, "registration.refresh_completed", "registered_list", total=len(plates),
+                         skipped=imported.skipped_entries if imported else 0)
     finally:
         _refresh_lock.release()

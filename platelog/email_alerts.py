@@ -8,7 +8,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from .diagnostics import record_event
 
 SMTP_SECRET_PREFIX = "PLATELOG_SMTP_PASSWORD_"
 SMTP_TIMEOUT = 5
@@ -125,7 +128,7 @@ def smtp_error(error: Exception, *, sending: bool) -> tuple[str, str]:
     return "failed", "Could not connect to the SMTP server."
 
 
-def test_smtp_connection(config: dict) -> tuple[str, str]:
+def test_smtp_connection(config: dict, *, data_dir: Path | None = None) -> tuple[str, str]:
     """Connect, negotiate TLS/auth and NOOP. Does not send an email."""
     try:
         with smtp_connection(config) as client:
@@ -133,11 +136,13 @@ def test_smtp_connection(config: dict) -> tuple[str, str]:
             if code != 250:
                 return "failed", f"The SMTP server rejected the connection test (code {code})."
     except (OSError, ValueError) as error:
+        if data_dir is not None:
+            record_event(data_dir, "smtp.test", "admin", level="warning", error=error, outcome="failed", security=config["security"])
         return smtp_error(error, sending=False)
     return "accepted", "SMTP connection passed. TLS and authentication were checked where configured. No email was sent."
 
 
-def send_alarm_email(config: dict, run: dict, zone_name: str) -> tuple[str, str]:
+def send_alarm_email(config: dict, run: dict, zone_name: str, *, data_dir: Path | None = None) -> tuple[str, str]:
     message = EmailMessage()
     values = {"plate": " ".join(run["plate"].split()), "camera": run["camera"],
               "status": run["plate_status"].capitalize()}
@@ -164,5 +169,7 @@ def send_alarm_email(config: dict, run: dict, zone_name: str) -> tuple[str, str]
             if refused:
                 return "partial", f"SMTP accepted the email for {len(addresses) - len(refused)} of {len(addresses)} recipients. No automatic retry."
     except (OSError, ValueError) as error:
+        if data_dir is not None:
+            record_event(data_dir, "alarm.failed", "alarms", level="error", error=error, camera=run["camera"], channel="smtp")
         return smtp_error(error, sending=sending)
     return "accepted", f"SMTP server accepted the email for {len(addresses)} recipient(s). Inbox delivery is not confirmed."

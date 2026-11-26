@@ -15,6 +15,12 @@ Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.
 
 Use the site's managed certificate policy. Run the [staff PC check](IT-COMMANDS.md#2-check-from-a-staff-pc) before handing over the link.
 
+### Offline troubleshooting
+
+Open **Admin → Diagnostics**, choose **Last 24 hours**, **Last 2 days**, **Last 3 days** or **All available history**, then select **Download diagnostics ZIP**. Copy the ZIP through the site's approved USB or file-transfer process for support. Nothing is uploaded automatically.
+
+The bundle includes runtime versions, safe configuration summaries, event counts, job outcomes and structured errors with code locations. It excludes passwords, number plates, photos, raw payloads, addresses and file paths. Detailed logs start with this version and retain up to **30 days or 8 MiB**, whichever is reached first. **All** includes available retained history; the bundle reports unreadable or limited input. If the web page cannot start, use the [offline diagnostics command](IT-COMMANDS.md#download-diagnostics).
+
 ## Quick start
 
 The browser demo uses simulated captures to show vehicle photos, live plate search, date and time filters, Excel export with photos, and password-protected application settings.
@@ -137,7 +143,7 @@ Sign in to **Admin** on TCP `8765` with the initial password `admin`, then set a
 
 ## Admin
 
-Under **Registered vehicles**, upload a UTF-8 CSV or an `.xlsx` file using the first worksheet. Use **Download CSV template** for a simple `Plate` column with one registration per row. Cardholder exports can instead use `Vehicle` and `Cardholder Authorised` columns. Format Excel registrations as Text before entering them so leading zeros are preserved. **Preview import** shows additions, existing plates, duplicates, and any removals. Select **Add to existing list** to keep plates missing from the file, or **Replace entire list** to remove them. Apply the preview after reviewing the changes. Each file can contain up to 25,000 rows and registration entries and be up to 4 MiB.
+Under **Registered vehicles**, upload a UTF-8 CSV or an `.xlsx` file using the first worksheet. Use **Download CSV template** for a simple `Plate` column with one registration per row. Cardholder exports can instead use `Vehicle` and `Cardholder Authorised` columns. Format Excel registrations as Text before entering them so leading zeros are preserved. **Replace entire list** is selected by default. **Preview import** shows additions, existing plates, duplicates, and any removals. Review and confirm before applying a replacement. Select **Add to existing list** to keep plates missing from the file. Each file can contain up to 25,000 rows and registration entries and be up to 4 MiB.
 
 For cardholder exports, `Cardholder Authorised` must contain `Yes` or `No`. Only `Yes` rows supply registered plates. Split the `Vehicle` field at commas, remove whitespace from each entry, and convert letters to uppercase. For example, `L19 MXB, ABC 123` supplies `L19MXB` and `ABC123`. Fields containing commas must be quoted in the CSV:
 

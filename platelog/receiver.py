@@ -6,6 +6,7 @@ import hmac
 import logging
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +17,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .axis import MAX_BODY_BYTES, PayloadError, media_type, parse_event
 from .credentials import password_matches
+from .diagnostics import record_event, route_category
 from .store import Store
 
 LOG = logging.getLogger(__name__)
@@ -79,11 +81,19 @@ def add_camera_intake(app: FastAPI, store: Store, can_post: Callable[[str, str],
             body.extend(chunk)
         try:
             event = await run_in_threadpool(parse_event, content_type, bytes(body))
-            return await run_in_threadpool(store.save, camera, event)
+            result = await run_in_threadpool(store.save, camera, event)
+            await run_in_threadpool(record_event, store.database.parent, "camera.accepted", "camera", camera=camera,
+                                    status=200, bytes=len(body), duplicate=bool(result.get("duplicate")),
+                                    photos=len(event.images), capture_age_ms=time.time_ns() // 1_000_000 - event.capture_ms)
+            return result
         except PayloadError as exc:
+            await run_in_threadpool(record_event, store.database.parent, "camera.rejected", "camera", level="warning",
+                                    error=exc, camera=camera, status=400, bytes=len(body))
             LOG.warning("Rejected invalid Axis event from %s", camera)
             raise HTTPException(400, str(exc)) from exc
         except (sqlite3.Error, OSError) as exc:
+            await run_in_threadpool(record_event, store.database.parent, "camera.storage_failed", "camera", level="error",
+                                    error=exc, camera=camera, status=503)
             LOG.error("Could not store Axis event from %s (%s)", camera, type(exc).__name__)
             raise HTTPException(503, "Event could not be stored") from exc
 
@@ -92,6 +102,19 @@ def make_camera_receiver(data_dir: Path, allowed_host: str) -> FastAPI:
     store = Store(data_dir)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", allowed_host], www_redirect=False)
+    @app.middleware("http")
+    async def camera_diagnostics(request: Request, call_next):
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            await run_in_threadpool(record_event, data_dir, "request.failed", "camera", level="error", error=exc,
+                                    route=route_category(request.url.path), method=request.method)
+            raise
+        if response.status_code >= 400:
+            await run_in_threadpool(record_event, data_dir, "request.rejected", "camera",
+                                    level="error" if response.status_code >= 500 else "warning",
+                                    status=response.status_code, route=route_category(request.url.path), method=request.method)
+        return response
     add_camera_intake(app, store, lambda camera, header: camera_can_post(store, camera, header))
     return app
 

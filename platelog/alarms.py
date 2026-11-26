@@ -8,11 +8,13 @@ import ssl
 import time
 from contextlib import closing
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlsplit
 from xml.etree import ElementTree
 
 from .email_alerts import DEFAULT_SUBJECT, recipients, send_alarm_email, subject_template
+from .diagnostics import record_event
 
 if TYPE_CHECKING:
     from .store import Store
@@ -114,7 +116,8 @@ def pulse_path(virtual_input: int, seconds: int) -> str:
     return f"{ACTIVATE_PATH}?{query}"
 
 
-def pulse_axis(module: str, virtual_input: int, seconds: int, username: str, secret_name: str) -> tuple[str, str]:
+def pulse_axis(module: str, virtual_input: int, seconds: int, username: str, secret_name: str, *,
+               data_dir: Path | None = None, camera: str | None = None) -> tuple[str, str]:
     password = os.environ.get(secret_name)
     if not password:
         return "failed", "The PlateLog service cannot read the configured password variable."
@@ -122,9 +125,13 @@ def pulse_axis(module: str, virtual_input: int, seconds: int, username: str, sec
     with closing(http.client.HTTPSConnection(module, timeout=AXIS_TIMEOUT, context=ssl.create_default_context())) as axis:
         try:
             axis.connect()
-        except ssl.SSLCertVerificationError:
+        except ssl.SSLCertVerificationError as exc:
+            if data_dir is not None:
+                record_event(data_dir, "alarm.failed", "alarms", level="error", error=exc, camera=camera, channel="vapix")
             return "failed", "The Axis device's HTTPS certificate could not be verified."
-        except OSError:
+        except OSError as exc:
+            if data_dir is not None:
+                record_event(data_dir, "alarm.failed", "alarms", level="error", error=exc, camera=camera, channel="vapix")
             return "failed", "Could not connect to the Axis device over HTTPS."
         try:
             axis.request("GET", pulse_path(virtual_input, seconds),
@@ -135,7 +142,9 @@ def pulse_axis(module: str, virtual_input: int, seconds: int, username: str, sec
                 if response.status != 200:
                     return "unconfirmed", f"Axis returned HTTP {response.status}."
                 body = response.read(MAX_REPLY_BYTES + 1)
-        except (OSError, http.client.HTTPException):
+        except (OSError, http.client.HTTPException) as exc:
+            if data_dir is not None:
+                record_event(data_dir, "alarm.failed", "alarms", level="error", error=exc, camera=camera, channel="vapix")
             return "unconfirmed", "Axis did not confirm the request."
 
     if len(body) <= MAX_REPLY_BYTES and b"<!DOCTYPE" not in body:
@@ -167,14 +176,20 @@ def run_due_alarms(store: "Store", now_ms: int | None = None, *, display_zone: s
             deliveries = {}
             if claimed["action"] in {"vapix", "both"}:
                 deliveries["vapix"] = pulse_axis(claimed["module"], claimed["virtual_input"], claimed["pulse_seconds"],
-                                                  claimed["username"], claimed["secret_name"])
+                                                  claimed["username"], claimed["secret_name"], data_dir=store.database.parent, camera=claimed["camera"])
                 store.record_alarm_delivery(claimed["passage_id"], "vapix", *deliveries["vapix"])
             if claimed["action"] in {"smtp", "both"}:
                 zone = store.setting("display_timezone") or display_zone
-                deliveries["smtp"] = send_alarm_email(claimed["smtp_config"], claimed, zone)
+                deliveries["smtp"] = send_alarm_email(claimed["smtp_config"], claimed, zone, data_dir=store.database.parent)
                 store.record_alarm_delivery(claimed["passage_id"], "smtp", *deliveries["smtp"])
             outcomes = {entry[0] for entry in deliveries.values()}
             result = outcomes.pop() if len(outcomes) == 1 else "partial"
             detail = " ".join(f'{"VAPIX" if action == "vapix" else "Email"}: {text}'
                                for action, (_, text) in deliveries.items())
             store.finish_alarm(claimed["passage_id"], result, detail)
+            for channel, (outcome, message) in deliveries.items():
+                code = re.search(r"\(error ([0-9]{1,5})\)", message)
+                status = re.search(r"(?:HTTP |code )([0-9]{3})", message)
+                record_event(store.database.parent, "alarm.delivery", "alarms", camera=claimed["camera"], channel=channel,
+                             outcome=outcome, level="error" if outcome in {"failed", "unconfirmed", "partial"} else "info",
+                             device_error_code=int(code[1]) if code else None, status=int(status[1]) if status else None)
