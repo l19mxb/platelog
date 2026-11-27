@@ -7,12 +7,12 @@ Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.
 ## Before you start
 
 - **Files** — Put the approved ZIP and its trusted `.sha256` file in the same server folder.
-- **DNS and TLS** — Match the internal DNS name to the certificate SAN. Put the leaf and intermediates in `server.pem` and the private key in `server-key.pem`.
+- **DNS and TLS** — Choose the internal DNS name. Setup offers **IT-managed certificate (preferred)** or **PlateLog-generated certificate (fallback)** with a selectable lifetime; see [certificate options](docs/CERTIFICATES.md).
 - **Access** — Allow **TCP 443** from staff networks. Give the runtime account read/execute on the app and venv, read on TLS files, and write on the data folder.
 
 ## 1. Install and start on the server
 
-For a fresh install, edit the settings and paste the block into interactive PowerShell with install access. Set an Admin password of 14+ characters.
+For a fresh install, edit the paths and paste the block into **Administrator PowerShell**. The setup wizard asks for the certificate option and a new Admin passphrase of 14+ characters. Keep the application, data and configuration folders separate.
 
 ```powershell
 & {
@@ -22,7 +22,7 @@ For a fresh install, edit the settings and paste the block into interactive Powe
     $Package = 'C:\Program Files\PlateLog\pilot'
     $Data = 'C:\ProgramData\PlateLog\pilot-data'
     $SiteName = 'platelog.example.internal'
-    $Tls = 'C:\ProgramData\PlateLog\tls'
+    $Configuration = 'C:\ProgramData\PlateLog\config'
 
     $ExpectedHash = ((Get-Content -LiteralPath "$Zip.sha256" -Raw).Trim() -split '\s+')[0]
     if ((Get-FileHash -LiteralPath $Zip -Algorithm SHA256).Hash -ne $ExpectedHash) {
@@ -33,30 +33,15 @@ For a fresh install, edit the settings and paste the block into interactive Powe
     }
 
     Expand-Archive -LiteralPath $Zip -DestinationPath $Package
-    & $Python -I -B -m venv (Join-Path $Package '.venv')
-    if ($LASTEXITCODE) { throw 'Virtual environment setup failed.' }
-
-    $AppPython = Join-Path $Package '.venv\Scripts\python.exe'
-    & $AppPython -I -m pip --isolated --disable-pip-version-check --no-input install `
-        --no-index --no-cache-dir --only-binary=:all: --require-hashes --no-compile `
-        --find-links (Join-Path $Package 'wheels') -r (Join-Path $Package 'requirements.offline.txt')
-    if ($LASTEXITCODE) { throw 'Offline wheel install failed.' }
-    & $AppPython -I -m pip --isolated --disable-pip-version-check check
-    if ($LASTEXITCODE) { throw 'Dependency check failed.' }
-
-    Push-Location -LiteralPath (Join-Path $Package 'app')
-    try {
-        & $AppPython -E -s -B -m platelog admin-password --data-dir $Data
-        if ($LASTEXITCODE) { throw 'Admin password setup failed.' }
-        & $AppPython -E -s -B -m platelog pilot --data-dir $Data --allowed-host $SiteName --port 443 `
-            --tls-cert "$Tls\server.pem" --tls-key "$Tls\server-key.pem"
-    } finally {
-        Pop-Location
-    }
+    & (Join-Path $Package 'Setup.ps1') -PythonPath $Python -SiteName $SiteName `
+        -DataDirectory $Data -ConfigurationDirectory $Configuration
+    & (Join-Path $Package 'Start-PlateLog.ps1') -SettingsPath (Join-Path $Configuration 'installation.json')
 }
 ```
 
-After Step 2, stop the foreground process. Use the same `pilot` command and `app` working directory in IT's approved supervisor for startup after reboot.
+After Step 2, stop the foreground process. Use `Start-PlateLog.ps1` with the selected runtime identity in IT's approved supervisor for startup after reboot. Setup does not create a service, startup task or firewall rule.
+
+**Certificate options:** IT-managed is selected by default and uses the expiry set by IT. The generated fallback defaults to **365 days**, selectable from **1–730 days**. Setup displays the exact expiry and public certificate SHA-256. Distribute only its public `.cer` to PCs/cameras; renewal of a self-signed certificate requires distributing the replacement. No automatic renewal is configured.
 
 ## 2. Check from a staff PC
 
@@ -79,9 +64,21 @@ Expect **ready** in **pilot** mode. Open `/admin`, select **Access & security**,
 
 ## Connect one camera
 
-1. Allow **TCP 8766** from the approved camera IP. Add `--camera-transport https --camera-port 8766` and restart PlateLog.
+1. Allow **TCP 8766** from the approved camera IP. Use `Start-PlateLog.ps1 -EnableCamera` in the supervisor startup command and restart PlateLog.
 2. Give the camera its own credential in **Admin → Axis cameras**. Set its HTTPS POST URL to `https://<name>:8766/api/axis/<id>/events`.
 3. Verify camera trust. Send one controlled pass and check the plate, time and photo.
+
+Keep the same `-SettingsPath` when non-default. This enables camera HTTPS on the saved camera port. For direct Python startup, the equivalent options are `--camera-transport https --camera-port 8766`.
+
+## Renew or change the HTTPS certificate
+
+In Administrator PowerShell from the installed package folder:
+
+```powershell
+.\Set-PlateLogCertificate.ps1
+```
+
+Choose IT-managed or PlateLog-generated and review the expiry. For a generated replacement, prepare its new public trust on clients before the normal supervisor restart. IT can renew managed PEM files at the same paths and restart directly. See [certificate maintenance](docs/CERTIFICATES.md#renewal).
 
 ## Optional email alerts (SMTP)
 

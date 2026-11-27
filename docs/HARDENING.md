@@ -21,6 +21,8 @@
 
 Set `--allowed-host` to the canonical DNS name. Use HTTPS bookmarks and block unintended staff HTTP listeners. Issue a Server Authentication certificate with the DNS name in its SAN and serve the intermediate chain. Distribute public CA trust using the site's managed policy; camera trust is separate. Assign a renewal owner and verify both clients after renewal. Use the [workstation trust steps](../IT-COMMANDS.md#2-check-from-a-staff-pc).
 
+The [native installer](../deploy/pilot/README.md) defaults to IT-managed certificates. Its generated fallback is a self-signed server certificate, not a CA, with a selectable 1–730 day lifetime (default 365). Approve that fallback and lifetime explicitly under site policy. Setup exports only the public certificate for distribution, restricts the private key to the runtime/administrators, validates TLS material without a network connection and changes no Windows trust store. Renewal is manual; clients need the replacement public trust before restart. Retain protected rollback material and remove obsolete trust/key copies through the approved process. See [certificate maintenance](CERTIFICATES.md).
+
 ## 3. Apply service-account and access controls
 
 - Run one process per data directory under IT's approved supervisor and a dedicated non-admin identity. The app and venv should be read/execute; the runtime must not be able to replace its own code.

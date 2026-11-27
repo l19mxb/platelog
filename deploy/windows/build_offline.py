@@ -13,6 +13,8 @@ SOURCE = Path(__file__).resolve().parents[2]
 APP_FILES = (
     "README.md", "IT-COMMANDS.md", "LICENSE", "technical-spec.md", "requirements.txt", "deploy/windows/README.md",
     "docs/SOC2-READINESS.md", "docs/HARDENING.md", "docs/security-evidence-2026-11-26.json",
+    "docs/CERTIFICATES.md", "deploy/pilot/README.md",
+    "deploy/pilot/CertificateSetup.ps1", "deploy/pilot/check_certificate.py", "deploy/pilot/bootstrap_admin.py",
     "docs/images/register.png", "docs/images/register-search.png", "docs/images/demo-l19mxb.jpg",
     "docs/images/admin-csv-folder.png",
     "examples/Send-AxisEvent.ps1",
@@ -26,6 +28,7 @@ APP_FILES = (
     "tests/test_alarms.py", "tests/test_audible.py", "tests/test_receiver.py", "tests/test_registered_vehicles.py", "tests/test_smtp.py",
     "tests/test_passage_history.py",
     "tests/test_diagnostics.py",
+    "tests/test_certificate_setup.py", "tests/certificate_setup_cases.ps1",
 )
 VENDOR_FILES = (
     ("python-3.13.17-amd64.exe", "Python", "3.13.17",

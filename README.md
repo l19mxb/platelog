@@ -13,6 +13,8 @@ Tested on **Windows Server 2025** with **CPython 3.15.2 x64** and **SQLite 3.53.
 - **Staff and Admin** use HTTPS on **TCP 443** by default. Set an alternate staff port with `--port` if IT requires one.
 - **Cameras** use HTTPS on **TCP 8766** when enabled. Follow the [single-camera setup](IT-COMMANDS.md#connect-one-camera).
 
+The offline Windows **Setup.ps1** offers [IT-managed certificates (preferred) or a PlateLog-generated fallback](docs/CERTIFICATES.md). The fallback defaults to **365 days**, with a selectable **1–730 day** lifetime. Setup displays expiry and renewal responsibility. The [native setup guide](deploy/pilot/README.md) covers installation and renewal.
+
 ### Workstation certificate trust
 
 Use the site's managed certificate policy. Run the [staff PC check](IT-COMMANDS.md#2-check-from-a-staff-pc) before handing over the link.

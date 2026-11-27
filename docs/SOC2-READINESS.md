@@ -36,6 +36,8 @@ The [machine-readable evidence summary](security-evidence-2026-11-26.json) recor
 
 ## Current control review
 
+**Certificate setup change:** the native installer now offers IT-managed TLS by default and a PlateLog-generated self-signed fallback with a selectable lifetime. See [certificate controls and renewal](CERTIFICATES.md). This adds installer, key-permission and client-trust acceptance requirements; it does not extend the 26 November operating evidence. Retain a separate exact-ZIP Windows Server receipt for the new setup. Application source and dependency versions remain unchanged by this installer feature.
+
 | Area | Controls verified | Residual limit |
 | --- | --- | --- |
 | Access | Pilot requires a configured Admin passphrase, HTTPS and a specific allowed hostname. Separate staff/Admin sessions, salted scrypt verifiers, eight-hour sessions, Secure/HttpOnly/SameSite cookies and Origin/CSRF checks. | Shared accounts, no MFA or individual download attribution. Staff sign-in and camera authentication can be weakened by configuration. |
