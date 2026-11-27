@@ -36,7 +36,9 @@ def main():
         store = Store(args.data_dir)
         if store.setting("admin_password"):
             raise ValueError("Administrator is already configured")
-        store.set_setting("admin_password", verifier, "Administrator password set by native setup")
+        store.initialize_admin_password(verifier)
+        if store.setting("admin_password") != verifier:
+            raise ValueError("Administrator was configured by another process")
     except Exception as error:
         cli.exit(1, f"Admin setup failed ({type(error).__name__}). Use a new data directory and a passphrase of 14+ characters, up to 1,024 UTF-8 bytes. Existing Admin credentials are never reset by this helper.\n")
     print(json.dumps({"result": "Passed", "admin_configured": True}))

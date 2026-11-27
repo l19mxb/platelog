@@ -124,6 +124,7 @@ $start.UseShellExecute = $false; $start.CreateNoWindow = $true
 $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
 $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
 $pointer = [IntPtr]::Zero
+$inputBytes = $null
 try {
     if (!$process.Start()) { throw 'Could not start Admin configuration.' }
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($AdminPassword)
